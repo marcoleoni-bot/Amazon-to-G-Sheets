@@ -19,49 +19,106 @@ const POLL_TIMEOUT_MS = Number(process.env.REPORT_WAIT_MS || 15 * 60_000);
  * lists newest first; each row is either still generating or carries a
  * download link.
  */
-async function readReportRows(page) {
-  const table = await findFirst(page, INVENTORY.reportTable, { timeout: 20_000 });
-  if (!table) return [];
-
-  const rows = table.locator.locator('tr');
-  const count = await rows.count();
-  const out = [];
-
-  for (let i = 0; i < count; i += 1) {
-    const row = rows.nth(i);
-    const text = (await row.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
-    if (!text) continue;
-
-    let link = null;
-    for (const descriptor of INVENTORY.downloadLink) {
-      const candidate = toLocator(row, descriptor).first();
-      if (await candidate.count().catch(() => 0)) {
-        if (await candidate.isVisible().catch(() => false)) { link = candidate; break; }
-      }
-    }
-
-    const pending = INVENTORY.pendingText.some((re) => re.test(text));
-    out.push({ index: i, text, link, pending, date: parseRowDate(text) });
-  }
-  return out;
-}
-
-/** Best-effort timestamp out of a row's text; null if we can't read one. */
-function parseRowDate(text) {
-  const patterns = [
-    /(\d{1,2}\/\d{1,2}\/\d{4}[,\s]+\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM)?)/i,
-    /(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2})/,
-    /(\d{1,2}\.\d{1,2}\.\d{4}[,\s]+\d{1,2}:\d{2})/,
-    /(\d{1,2}\/\d{1,2}\/\d{4})/,
-  ];
-  for (const re of patterns) {
-    const m = text.match(re);
-    if (m) {
-      const d = new Date(m[1].replace(/(\d{1,2})\.(\d{1,2})\.(\d{4})/, '$3-$2-$1'));
-      if (!Number.isNaN(d.getTime())) return d;
+async function findDownloadLink(scope) {
+  for (const descriptor of INVENTORY.downloadLink) {
+    const candidate = toLocator(scope, descriptor).first();
+    if (await candidate.count().catch(() => 0)) {
+      if (await candidate.isVisible().catch(() => false)) return candidate;
     }
   }
   return null;
+}
+
+/**
+ * Read the report table into something we can reason about. Report Central
+ * lists newest first; each row is either still generating or carries a
+ * download link.
+ *
+ * Falls back to a page-wide link scan when the list is not a <table> — Report
+ * Central has been rebuilt in div-based components before and will be again,
+ * and refusing to see a ready report because it is not in a <tr> is a bad way
+ * to spend fifteen minutes.
+ */
+async function readReportRows(page, dayFirst = false) {
+  const table = await findFirst(page, INVENTORY.reportTable, { timeout: 20_000 });
+
+  if (table) {
+    const rows = table.locator.locator('tr');
+    const count = await rows.count();
+    const out = [];
+
+    for (let i = 0; i < count; i += 1) {
+      const row = rows.nth(i);
+      const text = (await row.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+
+      const link = await findDownloadLink(row);
+      const pending = INVENTORY.pendingText.some((re) => re.test(text));
+      out.push({ index: i, text, link, pending, date: parseRowDate(text, dayFirst) });
+    }
+    if (out.some((r) => r.link)) return out;
+  }
+
+  // Nothing usable in a table — is there a download link anywhere on the page?
+  const loose = await findDownloadLink(page);
+  if (loose) {
+    const text = (await page.innerText('body').catch(() => '')).replace(/\s+/g, ' ').slice(0, 400);
+    return [{ index: 0, text, link: loose, pending: false, date: parseRowDate(text, dayFirst) }];
+  }
+
+  return table ? [] : [];
+}
+
+/** What the page actually showed, for when the poller finds nothing. */
+async function describePage(page, rows) {
+  const lines = [];
+  lines.push(`rows seen: ${rows.length}, with a download link: ${rows.filter((r) => r.link).length}`);
+  for (const r of rows.slice(0, 6)) {
+    lines.push(`  [${r.link ? 'link' : '    '}${r.pending ? ' pending' : ''}] ${r.text.slice(0, 120)}`);
+  }
+  const anchors = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('a, button'))
+      .map((el) => (el.innerText || '').replace(/\s+/g, ' ').trim())
+      .filter((t) => t && t.length < 40)
+      .slice(0, 25)).catch(() => []);
+  if (anchors.length) lines.push(`  clickable labels: ${anchors.join(' | ')}`);
+  return lines.join('\n');
+}
+
+/**
+ * Best-effort timestamp out of a row's text; null if we can't read one.
+ *
+ * `dayFirst` matters more than it looks. Europe writes 05/08/2026 for 5 August
+ * and North America writes it for 8 May. Guess wrong and a report generated
+ * minutes ago reads as three months old, gets rejected as stale, and the bot
+ * waits for a fresh one that already exists.
+ */
+export function parseRowDate(text, dayFirst = false) {
+  const isoMatch = String(text).match(/(\d{4}-\d{2}-\d{2})(?:[T\s](\d{2}:\d{2}))?/);
+  if (isoMatch) {
+    const d = new Date(`${isoMatch[1]}T${isoMatch[2] || '00:00'}Z`);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+
+  const m = String(text).match(
+    /(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})(?:[,\s]+(\d{1,2}):(\d{2}))?\s*(AM|PM)?/i);
+  if (!m) return null;
+
+  const [, a, b, year, hh = '0', mm = '0', ampm] = m;
+  let day = dayFirst ? Number(a) : Number(b);
+  let month = dayFirst ? Number(b) : Number(a);
+
+  // Self-correct when the assumed order is impossible: 25/12 can only be
+  // day-first however the page is meant to be read.
+  if (month > 12 && day <= 12) [day, month] = [month, day];
+  if (month > 12 || day > 31) return null;
+
+  let hours = Number(hh);
+  if (/pm/i.test(ampm || '') && hours < 12) hours += 12;
+  if (/am/i.test(ampm || '') && hours === 12) hours = 0;
+
+  const d = new Date(Date.UTC(Number(year), month - 1, day, hours, Number(mm)));
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 const ageHours = (d) => (d ? (Date.now() - d.getTime()) / 3_600_000 : null);
@@ -99,7 +156,8 @@ export async function fetchInventory(page, code) {
       + `(${active.how}); falling back to the SKU-suffix check on the downloaded file`);
   }
 
-  let rows = await readReportRows(page);
+  const dayFirst = mp.region === 'EU';
+  let rows = await readReportRows(page, dayFirst);
   let pick = pickReadyRow(rows);
 
   if (!pick) {
@@ -113,19 +171,35 @@ export async function fetchInventory(page, code) {
     await button.locator.click();
 
     const deadline = Date.now() + POLL_TIMEOUT_MS;
+    let polls = 0;
     while (Date.now() < deadline && !pick) {
       await sleep(POLL_INTERVAL_MS);
       await gotoWithRetry(page, url);
-      rows = await readReportRows(page);
+      rows = await readReportRows(page, dayFirst);
       pick = pickReadyRow(rows);
+      polls += 1;
+
       if (!pick) {
         const mins = Math.round((deadline - Date.now()) / 60_000);
-        log.info(`${code}: still generating (${mins} min left)`);
+        const ready = rows.filter((r) => r.link).length;
+        // Say why, not just how long. A ready report that the selectors cannot
+        // see looks exactly like a report that is not ready, and the difference
+        // matters enormously.
+        log.info(`${code}: no downloadable report yet — ${rows.length} row(s) on the page, `
+          + `${ready} with a download link (${mins} min left)`);
+        if (polls === 2 || polls === 6) {
+          log.warn(`${code}: if the report looks ready in the browser, the selectors are `
+            + 'missing it. What the page shows:');
+          console.error(await describePage(page, rows));
+        }
       }
     }
     if (!pick) {
-      throw new Error(`${code}: report was still generating after `
-        + `${Math.round(POLL_TIMEOUT_MS / 60_000)} minutes.`);
+      throw new Error(`${code}: no downloadable report after `
+        + `${Math.round(POLL_TIMEOUT_MS / 60_000)} minutes.\n`
+        + `${await describePage(page, rows)}\n`
+        + '  If the report IS ready in the browser, this is a selector problem, not a\n'
+        + '  timing one — update INVENTORY.downloadLink in src/selectors.js.');
     }
   }
 

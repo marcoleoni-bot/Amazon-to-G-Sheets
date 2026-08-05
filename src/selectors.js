@@ -31,22 +31,36 @@ export const INVENTORY = {
 
   /** The table of previously requested reports. */
   reportTable: [
-    { css: 'table:has(a[href*="download"])' },
+    { css: 'table:has(a[href*="download" i])' },
     { css: '[data-testid="report-list"]' },
     { css: 'table' },
+    { css: '[role="grid"]' },
   ],
 
-  /** A ready row's download link. Rows still generating have no link. */
+  /**
+   * A ready row's download link. Rows still generating have none.
+   *
+   * Deliberately unanchored: the label is "Download" in some marketplaces,
+   * "Download .csv" in others, and localised in the rest. Anchoring this to
+   * /^download$/ meant a ready report sat there unrecognised while the poller
+   * counted down fifteen minutes.
+   */
   downloadLink: [
-    { role: 'link', name: /^download$/i },
-    { role: 'button', name: /^download$/i },
-    { role: 'link', name: /herunterladen/i },
-    { css: 'a[href*="downloadReport"]' },
+    { css: 'a[href*="downloadReport" i]' },
+    { css: 'a[href*="download" i][href*="report" i]' },
     { css: 'a[download]' },
+    { role: 'link', name: /download/i },
+    { role: 'button', name: /download/i },
+    { role: 'link', name: /herunterladen|télécharger|telecharger|descargar|scarica/i },
+    { role: 'button', name: /herunterladen|télécharger|telecharger|descargar|scarica/i },
+    { css: 'a[href*="/download" i]' },
   ],
 
   /** Text that means "this row is not ready yet". */
-  pendingText: [/in progress/i, /generating/i, /pending/i, /wird erstellt/i],
+  pendingText: [
+    /in progress/i, /generating/i, /pending/i, /queued/i, /requested/i, /processing/i,
+    /wird erstellt/i, /in bearbeitung/i, /en cours/i, /in corso/i, /en proceso/i,
+  ],
 };
 
 /**

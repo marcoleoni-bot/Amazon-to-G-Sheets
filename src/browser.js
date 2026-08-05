@@ -38,7 +38,8 @@ export async function openRegion(regionKey, { headless = true } = {}) {
     storageState: hasState ? region.statePath : undefined,
     acceptDownloads: true,
     viewport: { width: 1500, height: 1000 },
-    locale: 'en-GB',
+    // Match the region so dates render the way parseRowDate expects them.
+    locale: regionKey === 'EU' ? 'en-GB' : 'en-US',
   });
   const page = await context.newPage();
 
