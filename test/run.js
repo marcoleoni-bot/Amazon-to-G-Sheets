@@ -125,7 +125,8 @@ test('a clean marketplace file passes', () => {
     code: 'UK', header: invHeader, rows: invRows(['A-UK1', 'B-UK1', 'C-UK1']),
   });
   assert.equal(r.checked, true);
-  assert.equal(r.share, 1);
+  assert.equal(r.expectedCount, 3);
+  assert.equal(r.foreignCount, 0);
 });
 
 test('contamination — the UK tab served the CA file — is caught', () => {
@@ -147,11 +148,11 @@ test('US is verified by the absence of a suffix, not by ignoring the check', () 
     true);
 });
 
-test('a mixed file is rejected even though the majority is right', () => {
+test('a file carrying another marketplace\'s SKUs is rejected', () => {
   const skus = [...Array(6).fill('X-UK1'), ...Array(4).fill('Y-CA')];
   assert.throws(
     () => verifyMarketplace({ code: 'UK', header: invHeader, rows: invRows(skus) }),
-    (err) => /mixture|60\.0%/.test(err.message));
+    (err) => /another marketplace/.test(err.message));
 });
 
 test('DE passes on the EU pool but is flagged as block-level only', () => {
@@ -260,7 +261,7 @@ test('a contamination error names example SKUs, not just counts', () => {
   } catch (err) {
     assert.match(err.message, /Example SKUs/);
     assert.match(err.message, /ABC-123/);
-    assert.match(err.message, /do not use the suffix/);
+    assert.match(err.message, /not one of the .* carries the UK signal/);
   }
 });
 
@@ -273,6 +274,63 @@ test('a mixed file reports examples from every class it saw', () => {
   } catch (err) {
     assert.match(err.message, /X-UK1/);
     assert.match(err.message, /Y-EU/);
-    assert.match(err.message, /60\.0%/);
+    assert.match(err.message, /another marketplace/);
   }
+});
+
+/**
+ * Regression cases taken verbatim from real runs against the live account.
+ * Each row count and distribution below was observed, not invented — three
+ * files that must pass and two that must fail.
+ */
+const skuFile = (spec) => Object.entries(spec)
+  .flatMap(([suffix, n]) => Array.from({ length: n },
+    (_, i) => [`101-${1000 + i}-V2-COM${suffix === 'none' ? '' : suffix}`]));
+
+test('real CA file: 65 suffixed + 74 legacy unsuffixed passes', () => {
+  const r = verifyMarketplace({
+    code: 'CA', header: ['sku'], rows: skuFile({ '-CA': 65, none: 74 }),
+  });
+  assert.equal(r.checked, true);
+  assert.equal(r.expectedCount, 65);
+  assert.equal(r.foreignCount, 0);
+});
+
+test('real UK file: 50 suffixed + 59 legacy unsuffixed passes', () => {
+  const r = verifyMarketplace({
+    code: 'UK', header: ['sku'], rows: skuFile({ '-UK1': 50, none: 59 }),
+  });
+  assert.equal(r.checked, true);
+  assert.equal(r.expectedCount, 50);
+});
+
+test('real US file: 132 unsuffixed passes', () => {
+  const r = verifyMarketplace({
+    code: 'US', header: ['sku'], rows: skuFile({ none: 132 }),
+  });
+  assert.equal(r.checked, true);
+  assert.equal(r.foreignCount, 0);
+});
+
+test('the US file served for a CA request is still caught', () => {
+  // Observed before the marketplace-switch fix: 132 rows, not one of them -CA.
+  assert.throws(
+    () => verifyMarketplace({ code: 'CA', header: ['sku'], rows: skuFile({ none: 132 }) }),
+    (err) => /not one of the 132 sampled SKUs carries the CA signal/.test(err.message));
+});
+
+test('the EU file served for a UK request is still caught', () => {
+  // Observed before the fix: 61 unsuffixed, 55 -EU, zero -UK1.
+  assert.throws(
+    () => verifyMarketplace({ code: 'UK', header: ['sku'], rows: skuFile({ none: 61, '-EU': 55 }) }),
+    (err) => /another marketplace/.test(err.message));
+});
+
+test('a handful of stray foreign SKUs is tolerated, a foreign file is not', () => {
+  assert.doesNotThrow(() => verifyMarketplace({
+    code: 'CA', header: ['sku'], rows: skuFile({ '-CA': 100, none: 95, '-UK1': 5 }),
+  }), 'five strays in 200 rows is under tolerance');
+  assert.throws(() => verifyMarketplace({
+    code: 'CA', header: ['sku'], rows: skuFile({ '-CA': 100, none: 50, '-UK1': 50 }),
+  }), MarketplaceMismatchError);
 });

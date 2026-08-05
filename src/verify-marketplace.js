@@ -14,8 +14,29 @@ import { columnIndex } from './parse.js';
  * So the file has to prove which marketplace it belongs to before it is trusted.
  */
 
-/** Fraction of rows that must agree with the requested marketplace. */
-const DOMINANCE = Number(process.env.MARKETPLACE_DOMINANCE || 0.8);
+/**
+ * How the evidence actually works.
+ *
+ * A suffix is a POSITIVE signal: "-CA" means this listing is Canadian. The
+ * absence of a suffix signals nothing — legacy listings carry no suffix and
+ * appear in every marketplace. A real Canadian file looks like this:
+ *
+ *     101-1015-V2-COM        legacy, no suffix
+ *     101-1015-V2-COM-CA     same product, suffixed
+ *
+ * both rows, same file. An earlier rule required 80% of SKUs to carry the
+ * expected suffix, which treated "no suffix" as evidence of the US and failed
+ * that perfectly good file. So instead, two questions that the evidence can
+ * genuinely answer:
+ *
+ *   1. Are another marketplace's SKUs in here?  → served the wrong file
+ *   2. Is the expected suffix entirely absent?  → served the wrong file
+ *
+ * Unsuffixed rows are neutral to both. Contamination means a whole foreign
+ * file, so it trips these decisively — the 132-row US file served for a CA
+ * request had zero "-CA" SKUs and failed on question 2.
+ */
+const FOREIGN_TOLERANCE = Number(process.env.MARKETPLACE_FOREIGN_TOLERANCE || 0.05);
 
 /**
  * The SKU suffix each marketplace's listings carry.
@@ -99,9 +120,15 @@ export function verifyMarketplace({ code, header, rows, sampleSize = 400 }) {
   }
 
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  const [topClass, topCount] = ranked[0];
-  const share = topCount / sample.length;
   const distribution = ranked.map(([k, v]) => `${k}=${v}`).join(', ');
+
+  const UNSUFFIXED = 'US (no suffix)';
+  const expectedCount = counts.get(expected) || 0;
+  const foreign = ranked.filter(([cls]) =>
+    cls !== expected && cls !== UNSUFFIXED && cls !== 'blank');
+  const foreignCount = foreign.reduce((sum, [, n]) => sum + n, 0);
+  const foreignShare = foreignCount / sample.length;
+  const expectsSuffix = Boolean(MARKETPLACES[code].skuSuffix);
 
   // Show the actual SKUs. The suffix convention is a property of *this
   // account's* naming, not of Amazon, so a mismatch is as likely to mean the
@@ -111,36 +138,46 @@ export function verifyMarketplace({ code, header, rows, sampleSize = 400 }) {
     .map(([cls]) => `      ${cls}: ${examples.get(cls).join(', ')}`)
     .join('\n');
 
-  if (topClass !== expected) {
+  // Question 1: are another marketplace's SKUs in this file?
+  if (foreignShare > FOREIGN_TOLERANCE) {
     throw new MarketplaceMismatchError(code, {
-      looksLike: topClass,
-      detail: `${topCount}/${sample.length} sampled SKUs classify as "${topClass}", `
-        + `expected "${expected}".\n    Distribution: ${distribution}\n    Example SKUs:\n${witness}\n`
-        + '    Either Report Central served another marketplace\'s file, or this account\'s\n'
-        + `    ${code} SKUs do not use the suffix this bot was told to expect — the example\n`
-        + '    SKUs above will tell you which. To correct the convention, see SKU_SIGNALS\n'
-        + '    in src/verify-marketplace.js.',
+      looksLike: foreign[0][0],
+      detail: `${foreignCount}/${sample.length} sampled SKUs belong to another marketplace `
+        + `(${foreign.map(([c, n]) => `${c}=${n}`).join(', ')}), above the `
+        + `${(FOREIGN_TOLERANCE * 100).toFixed(0)}% tolerance.\n`
+        + `    Distribution: ${distribution}\n    Example SKUs:\n${witness}\n`
+        + '    Report Central served another marketplace\'s file.',
     });
   }
 
-  if (share < DOMINANCE) {
+  // Question 2: is the expected suffix missing entirely?
+  if (expectsSuffix && expectedCount === 0) {
     throw new MarketplaceMismatchError(code, {
-      looksLike: 'a mixture',
-      detail: `only ${(share * 100).toFixed(1)}% of sampled SKUs classify as "${expected}" `
-        + `(threshold ${(DOMINANCE * 100).toFixed(0)}%).\n    Distribution: ${distribution}\n`
-        + `    Example SKUs:\n${witness}`,
+      looksLike: 'a file with no {code} listings at all'.replace('{code}', code),
+      detail: `not one of the ${sample.length} sampled SKUs carries the ${code} signal `
+        + `("${MARKETPLACES[code].skuSuffix}").\n`
+        + `    Distribution: ${distribution}\n    Example SKUs:\n${witness}\n`
+        + `    A genuine ${code} file contains at least some suffixed listings alongside the\n`
+        + '    unsuffixed legacy ones. None at all means another marketplace\'s file.\n'
+        + `    If this account genuinely stopped using "${MARKETPLACES[code].skuSuffix}" for\n`
+        + '    that marketplace, correct SKU_SIGNALS in src/verify-marketplace.js.',
     });
   }
+
+  const unsuffixed = counts.get(UNSUFFIXED) || 0;
+  const note = expectsSuffix
+    ? `${expectedCount} SKU(s) carry the ${code} signal, ${unsuffixed} unsuffixed legacy, `
+      + `no foreign suffixes${blockLevelOnly ? ' — EU pool, cannot distinguish from DE/FR/IT/ES' : ''}`
+    : `no foreign suffixes among ${sample.length} sampled SKUs`;
 
   return {
     checked: true,
     blockLevelOnly,
     sampled: sample.length,
-    share,
     expected,
+    expectedCount,
+    foreignCount,
     distribution,
-    note: blockLevelOnly
-      ? `matches the EU pool, which cannot distinguish ${code} from DE/FR/IT/ES by SKU`
-      : `${(share * 100).toFixed(1)}% of SKUs carry the ${code} signal`,
+    note,
   };
 }
