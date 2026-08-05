@@ -22,6 +22,11 @@ const PATTERNS = [
   { name: 'merchantId field', re: new RegExp(`"merchant(?:_i|I)d"\\s*:\\s*"(${TOKEN})"`, 'g') },
   { name: 'sellerId field', re: new RegExp(`"seller(?:_i|I)d"\\s*:\\s*"(${TOKEN})"`, 'g') },
   { name: 'merchantCustomerId field', re: new RegExp(`"merchantCustomerId"\\s*:\\s*"(${TOKEN})"`, 'g') },
+  { name: 'merchantToken field', re: new RegExp(`"merchantToken"\\s*:\\s*"(${TOKEN})"`, 'g') },
+  { name: 'encodedMerchantId field', re: new RegExp(`"encodedMerchantId"\\s*:\\s*"(${TOKEN})"`, 'g') },
+  { name: 'data-merchant attribute', re: new RegExp(`data-merchant(?:-id)?=["'](${TOKEN})["']`, 'g') },
+  { name: 'sellerId parameter', re: new RegExp(`[?&](?:sellerId|seller)=(${TOKEN})`, 'g') },
+  { name: 'merchant path segment', re: new RegExp(`/(?:merchant|seller)/(${TOKEN})\\b`, 'g') },
   { name: 'ld_mcid cookie value', re: new RegExp(`ld_mcid["'=:\\s]+(${TOKEN})`, 'g') },
 ];
 
@@ -66,31 +71,77 @@ export function extractMerchantIds(html, cookies = []) {
 }
 
 /**
+ * Gather every place on a rendered page a token might hide.
+ *
+ * page.content() alone is not enough: Seller Central's header — where the
+ * marketplace-switcher links live, the best source there is — is rendered
+ * client-side, so a scan at domcontentloaded sees a shell with nothing in it.
+ * Reading hrefs and storage out of the live DOM catches what the HTML string
+ * misses.
+ */
+async function gather(page) {
+  const html = await page.content().catch(() => '');
+
+  const hrefs = await page.evaluate(() =>
+    Array.from(document.querySelectorAll('a[href], form[action]'))
+      .map((el) => el.getAttribute('href') || el.getAttribute('action'))
+      .join('\n')).catch(() => '');
+
+  const storage = await page.evaluate(() => {
+    const out = [];
+    for (const store of ['localStorage', 'sessionStorage']) {
+      try {
+        const s = window[store];
+        for (let i = 0; i < s.length; i += 1) out.push(`${s.key(i)}=${s.getItem(s.key(i))}`);
+      } catch { /* storage can be blocked; not fatal */ }
+    }
+    return out.join('\n');
+  }).catch(() => '');
+
+  const cookies = await page.context().cookies().catch(() => []);
+  return { text: [html, hrefs, storage, page.url()].join('\n'), cookies };
+}
+
+/** Signed-out pages render fine and simply contain no token — worth telling apart. */
+export function looksSignedOut(text) {
+  return /ap\/signin|Sign in to continue|Amazon Sign[- ]In|<title>[^<]*Sign[- ]?In/i.test(text)
+    && !/mons_sel_dir_mcid|Seller Central Home/i.test(text);
+}
+
+/**
  * Discover the merchant token for a live signed-in page.
  *
- * The marketplace switcher is opened first when present: its links are the
- * highest-confidence source, and on some pages it is rendered lazily.
+ * Scans, waits, scans again — the header populates asynchronously and the first
+ * look is often too early. Only then does it try opening the switcher.
  */
-export async function discoverMerchantId(page, host) {
-  const scan = async () => {
-    const html = await page.content().catch(() => '');
-    const cookies = await page.context().cookies().catch(() => []);
-    return extractMerchantIds(html, cookies);
-  };
+export async function discoverMerchantId(page, host, { attempts = 3 } = {}) {
+  await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
 
-  let candidates = await scan();
+  let last = { text: '', cookies: [] };
 
-  if (!candidates.length) {
-    // Nudge the switcher open — its menu is where the token most reliably lives.
-    const switcher = page.locator(
-      'button:has-text("Amazon."), [data-testid*="marketplace"], #sc-mkt-picker-switcher-select')
-      .first();
-    if (await switcher.count().catch(() => 0)) {
-      await switcher.click({ timeout: 5000 }).catch(() => {});
-      await page.waitForTimeout(2500);
-      candidates = await scan();
-    }
+  for (let i = 0; i < attempts; i += 1) {
+    last = await gather(page);
+    const candidates = extractMerchantIds(last.text, last.cookies);
+    if (candidates.length) return { host, candidates, signedOut: false };
+    await page.waitForTimeout(2500);
   }
 
-  return { host, candidates };
+  // Nudge the switcher open — its menu is where the token most reliably lives,
+  // and on some pages it is not rendered until first interaction.
+  const switcher = page.locator([
+    '#sc-mkt-picker-switcher-select',
+    '[data-testid*="marketplace" i]',
+    '[id*="picker" i]',
+    'button:has-text("Amazon.")',
+  ].join(', ')).first();
+
+  if (await switcher.count().catch(() => 0)) {
+    await switcher.click({ timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+    last = await gather(page);
+    const candidates = extractMerchantIds(last.text, last.cookies);
+    if (candidates.length) return { host, candidates, signedOut: false };
+  }
+
+  return { host, candidates: [], signedOut: looksSignedOut(last.text) };
 }

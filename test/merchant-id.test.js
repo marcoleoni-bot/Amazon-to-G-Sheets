@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { extractMerchantIds, looksLikeToken, isPlaceholder } from '../src/merchant-id.js';
+import {
+  extractMerchantIds, looksLikeToken, isPlaceholder, looksSignedOut,
+} from '../src/merchant-id.js';
 
 const REAL = 'A2K8LM3PQ9WXYZ';
 const OTHER = 'A3JQ7WD2LMN4XY';
@@ -81,4 +83,27 @@ test('handles the real-world case of the token appearing many times', () => {
   const found = extractMerchantIds(html);
   assert.equal(found.length, 1, 'repeats collapse to one candidate');
   assert.equal(found[0].sources.length, 1, 'one source, not twelve');
+});
+
+test('tells a signed-out page apart from a signed-in one with no token', () => {
+  assert.equal(looksSignedOut('<title>Amazon Sign-In</title><form action="/ap/signin">'), true);
+  assert.equal(looksSignedOut('<html><body>Seller Central Home</body></html>'), false);
+  assert.equal(
+    looksSignedOut('<a href="/ap/signin">Sign in</a><a href="?mons_sel_dir_mcid=A2K8LM3PQ9WXYZ">'),
+    false,
+    'a token present means signed in, whatever else the page mentions');
+});
+
+test('finds tokens in the newer markup shapes', () => {
+  for (const [label, html] of [
+    ['merchantToken', `{"merchantToken":"${REAL}"}`],
+    ['data attribute', `<div data-merchant-id="${REAL}"></div>`],
+    ['sellerId param', `<a href="/x?sellerId=${REAL}">x</a>`],
+    ['path segment', `<a href="/merchant/${REAL}/settings">x</a>`],
+    ['encodedMerchantId', `{"encodedMerchantId":"${REAL}"}`],
+  ]) {
+    const [top] = extractMerchantIds(html);
+    assert.ok(top, `nothing found for ${label}`);
+    assert.equal(top.token, REAL, label);
+  }
 });

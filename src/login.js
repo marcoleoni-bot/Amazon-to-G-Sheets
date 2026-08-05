@@ -1,6 +1,9 @@
 import readline from 'node:readline';
-import { REGIONS } from './config.js';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { REGIONS, MERCHANT_CACHE } from './config.js';
 import { openRegion } from './browser.js';
+import { discoverMerchantId } from './merchant-id.js';
 import { sleep } from './dates.js';
 import { log, heading } from './log.js';
 
@@ -64,6 +67,25 @@ if (how === 'timeout') {
 
 await session.save();
 log.ok(`Saved ${regionKey} session to ${region.statePath} (${how === 'enter' ? 'manual' : 'auto-detected'})`);
+
+// A freshly signed-in, fully rendered, headed page is the best chance we get at
+// the merchant token — better than anything headless will see later.
+try {
+  const { candidates } = await discoverMerchantId(session.page, region.loginHost);
+  if (candidates.length) {
+    const store = existsSync(MERCHANT_CACHE) ? JSON.parse(readFileSync(MERCHANT_CACHE, 'utf8')) : {};
+    store[regionKey] = candidates[0].token;
+    mkdirSync(dirname(MERCHANT_CACHE), { recursive: true });
+    writeFileSync(MERCHANT_CACHE, `${JSON.stringify(store, null, 2)}\n`);
+    log.ok(`Captured ${regionKey} merchant token ${candidates[0].token} → ${MERCHANT_CACHE}`);
+  } else {
+    log.warn(`Could not read the ${regionKey} merchant token from this page. `
+      + 'Switch marketplace once in the open browser, copy mons_sel_dir_mcid out of the '
+      + `address bar, then:  npm run whoami -- ${regionKey} <token>`);
+  }
+} catch (err) {
+  log.warn(`Merchant token discovery failed: ${err.message}`);
+}
 console.log(`
   Verify it works headlessly:   npm run check
   Expect to redo this roughly monthly — Amazon expires the session every 2-4 weeks.

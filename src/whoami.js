@@ -1,7 +1,8 @@
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { REGIONS, MERCHANT_CACHE } from './config.js';
 import { openRegion, gotoWithRetry } from './browser.js';
-import { discoverMerchantId } from './merchant-id.js';
+import { discoverMerchantId, isPlaceholder, looksLikeToken } from './merchant-id.js';
 import { log, heading } from './log.js';
 
 /**
@@ -18,10 +19,11 @@ import { log, heading } from './log.js';
  */
 
 const only = (process.argv[2] || '').toUpperCase();
+const manual = process.argv[3];
 const regions = only ? [only] : Object.keys(REGIONS);
 
 if (only && !REGIONS[only]) {
-  console.error('Usage: npm run whoami [-- NA|EU]');
+  console.error('Usage: npm run whoami [-- NA|EU [token]]');
   process.exit(2);
 }
 
@@ -29,6 +31,20 @@ const found = existsSync(MERCHANT_CACHE)
   ? JSON.parse(readFileSync(MERCHANT_CACHE, 'utf8'))
   : {};
 let problems = 0;
+
+// Manual route: npm run whoami -- NA A2K8LM3PQ9WXYZ
+if (manual) {
+  if (isPlaceholder(manual) || !looksLikeToken(manual)) {
+    log.fail(`"${manual}" is not a merchant token. Expected something like A2K8LM3PQ9WXYZ — `
+      + 'starts with A, 12-20 uppercase letters and digits.');
+    process.exit(2);
+  }
+  found[only] = manual;
+  mkdirSync(dirname(MERCHANT_CACHE), { recursive: true });
+  writeFileSync(MERCHANT_CACHE, `${JSON.stringify(found, null, 2)}\n`);
+  log.ok(`Recorded ${only} merchant token ${manual} → ${MERCHANT_CACHE}`);
+  process.exit(0);
+}
 
 for (const regionKey of regions) {
   const region = REGIONS[regionKey];
@@ -39,13 +55,20 @@ for (const regionKey of regions) {
     session = await openRegion(regionKey, { headless: !process.env.HEADED });
     await gotoWithRetry(session.page, `https://${region.loginHost}/home`);
 
-    const { candidates } = await discoverMerchantId(session.page, region.loginHost);
+    const { candidates, signedOut } = await discoverMerchantId(session.page, region.loginHost);
 
     if (!candidates.length) {
       problems += 1;
-      log.fail('no merchant token found on the signed-in page');
-      log.info('Fall back to the manual route: switch marketplace once in the browser and');
-      log.info('read mons_sel_dir_mcid out of the address bar.');
+      if (signedOut) {
+        log.fail('this session is signed out — the page rendered a sign-in screen without '
+          + `redirecting to /ap/signin. Run:  npm run login -- ${regionKey}`);
+      } else {
+        log.fail('signed in, but no merchant token found in the page markup');
+        log.info('Two ways forward:');
+        log.info(`  1. HEADED=1 npm run whoami -- ${regionKey}   (watch what the page shows)`);
+        log.info('  2. Switch marketplace once in your own browser, copy mons_sel_dir_mcid');
+        log.info(`     out of the address bar, then:  npm run whoami -- ${regionKey} <token>`);
+      }
       continue;
     }
 
