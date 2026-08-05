@@ -7,3 +7,4 @@ config.local.json
 service-account*.json
 .env
 .DS_Store
+doctor-report.txt

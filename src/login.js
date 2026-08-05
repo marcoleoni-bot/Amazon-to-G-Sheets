@@ -78,10 +78,14 @@ try {
     mkdirSync(dirname(MERCHANT_CACHE), { recursive: true });
     writeFileSync(MERCHANT_CACHE, `${JSON.stringify(store, null, 2)}\n`);
     log.ok(`Captured ${regionKey} merchant token ${candidates[0].token} → ${MERCHANT_CACHE}`);
+  } else if (existsSync(MERCHANT_CACHE)
+    && JSON.parse(readFileSync(MERCHANT_CACHE, 'utf8'))[regionKey]) {
+    // Already recorded — discovery failing is cosmetic, not a problem.
+    log.info(`${regionKey} merchant ID already recorded in ${MERCHANT_CACHE}; keeping it.`);
   } else {
-    log.warn(`Could not read the ${regionKey} merchant token from this page. `
-      + 'Switch marketplace once in the open browser, copy mons_sel_dir_mcid out of the '
-      + `address bar, then:  npm run whoami -- ${regionKey} <token>`);
+    log.warn(`Could not read the ${regionKey} merchant ID from this page. `
+      + 'Switch marketplace once in the open browser, then paste the whole URL:\n'
+      + `    npm run whoami -- ${regionKey} "https://..."`);
   }
 } catch (err) {
   log.warn(`Merchant token discovery failed: ${err.message}`);

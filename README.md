@@ -82,6 +82,7 @@ npm run check               # preflight: sessions, IDs, baselines, tabs, date wi
 npm run login -- NA|EU              # manual sign-in, saves cookies only
 npm run whoami                      # discover merchant tokens from the saved sessions
 npm run check                       # preflight, writes nothing
+npm run doctor                      # run all 4 inventory pulls, write one report, change nothing
 npm run try -- inventory US         # one pull, validated, printed, not written
 npm run try -- sales DE 30          # ditto; HEADED=1 to watch it
 npm run baseline -- inventory US    # record/accept a schema baseline
@@ -107,6 +108,34 @@ A browser opens, already signed in. Click your usual path — Reports → Busine
 Repeat for `record:eu`. Prefer `getByRole('button', { name: '...' })` over CSS chains — role-based selectors survive Amazon's redesigns; `div > div:nth-child(3) > span` does not.
 
 You can put overrides in `src/selectors.local.js` (gitignored, same shape) to fix a broken path without a commit.
+
+## When something goes wrong
+
+```bash
+npm run doctor
+```
+
+Runs every inventory marketplace, keeps going past failures instead of stopping
+at the first, and writes `doctor-report.txt` with what each page actually looked
+like — the marketplace picker's text, the clickable labels, the first table rows.
+Merchant IDs are redacted. One run answers what several rounds of "try this, paste
+the output" used to.
+
+## Letting an agent drive this
+
+The remaining rough edges all live inside a signed-in Seller Central session, so
+they cannot be diagnosed from anywhere but the machine holding the cookies. If you
+would rather not be the one running commands and pasting output, run the agent
+where the session is:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+cd ~/amazon-report-bot && claude
+```
+
+Then: *"run npm run doctor, fix whatever fails, and keep going until all four
+marketplaces pass."* It can run the commands, read the real output, edit the
+selectors and re-run — the loop that otherwise needs a person in the middle.
 
 ## Day-one verification (do not skip)
 
