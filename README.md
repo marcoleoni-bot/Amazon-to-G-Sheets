@@ -49,13 +49,24 @@ export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 export ALERT_WEBHOOK=https://n8n.operationautopilot.com/webhook/amazon-bot   # optional
 ```
 
-**Merchant tokens.** NA and EU have different ones and both are needed. Easiest:
+**Merchant IDs.** NA and EU have different ones and both are needed.
+
+The reliable way: in Seller Central, switch marketplace once (US → CA for NA, UK → DE for EU), then paste the **whole resulting URL**:
 
 ```bash
-npm run whoami          # reads them out of your saved sessions → .state/merchants.json
+npm run whoami -- NA "https://sellercentral.amazon.com/...?mons_sel_dir_mcid=..."
+npm run whoami -- EU "https://sellercentral.amazon.co.uk/...?mons_sel_dir_mcid=..."
 ```
 
-That exists because Settings → Account Info → Merchant Token is gated to the primary account holder — a secondary user cannot read their own token from the UI, but it is present in every signed-in page's markup. Failing that, switch marketplace once in the browser and read `mons_sel_dir_mcid` out of the address bar, then set `NA_MERCHANT_ID` and `EU_MERCHANT_ID` (an environment variable overrides the cache file).
+It pulls out `mons_sel_dir_mcid` and `mons_sel_dir_paid`, ignores `mons_sel_mkid` (all seven marketplaces are already configured), and refuses a `.co.uk` URL recorded as NA. Paste the URL rather than picking one ID out of it by hand — it contains three opaque `amzn1.*` values that look alike, and choosing wrong produces no error, just the wrong account's data.
+
+Or let it read them out of the saved sessions:
+
+```bash
+npm run whoami          # → .state/merchants.json
+```
+
+That path exists because Settings → Account Info → Merchant Token is gated to the primary account holder, so a secondary user cannot read their own ID from the UI. Environment variables `NA_MERCHANT_ID` / `EU_MERCHANT_ID` / `AMZN_PAID_ID` override the cache file if you'd rather set them that way.
 
 Then:
 

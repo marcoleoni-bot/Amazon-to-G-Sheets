@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   extractMerchantIds, looksLikeToken, isPlaceholder, looksSignedOut, isMarketplaceId,
+  parseSwitchUrl, looksLikePaid,
 } from '../src/merchant-id.js';
 
 const REAL = 'A2K8LM3PQ9WXYZ';
@@ -108,7 +109,7 @@ test('finds tokens in the newer markup shapes', () => {
   }
 });
 
-const MODERN_ID = 'amzn1.merchant.d.AB6YW7FYB5RHAC5LMULWP6GQDWFQ';
+const MODERN_ID = 'amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS';
 
 test('accepts both the modern and legacy merchant id shapes', () => {
   assert.equal(looksLikeToken(MODERN_ID), true);
@@ -119,10 +120,10 @@ test('accepts both the modern and legacy merchant id shapes', () => {
 
 test('a modern id is never truncated to a legacy-shaped fragment', () => {
   // The bug this guards: A[A-Z0-9]{11,19} matches the first 20 characters of
-  // AB6YW7FYB5RHAC5LMULWP6GQDWFQ, producing a wrong id of the right shape.
+  // EXAMPLEMERCHANTIDFORTESTS, producing a wrong id of the right shape.
   const [top] = extractMerchantIds(`<a href="/x?mons_sel_dir_mcid=${MODERN_ID}">m</a>`);
   assert.equal(top.token, MODERN_ID);
-  assert.ok(!top.token.endsWith('LMULW'), 'must not be a 20-char truncation');
+  assert.ok(top.token.length > 20, 'must not be truncated to a legacy-length fragment');
 });
 
 test('marketplace ids are rejected however they are written', () => {
@@ -144,4 +145,46 @@ test('a real switcher URL yields the merchant, not the marketplace beside it', (
 test('modern ids survive being read out of a cookie', () => {
   const [top] = extractMerchantIds('', [{ name: 'ld_mcid', value: MODERN_ID }]);
   assert.equal(top.token, MODERN_ID, 'splitting on dots would have shredded this');
+});
+
+const SWITCH_URL = 'https://sellercentral.amazon.com/amazonsell/business'
+  + '?mons_sel_mkid=amzn1.mp.o.A2EUQ1WTGCTBG2'
+  + '&mons_sel_dir_mcid=amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS'
+  + '&mons_sel_dir_paid=amzn1.pa.d.EXAMPLEPAIDIDFORTESTS'
+  + '&ignore_selection_changed=true';
+
+test('a pasted switch URL yields all three ids, unconfused', () => {
+  const p = parseSwitchUrl(SWITCH_URL);
+  assert.equal(p.mcid, 'amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS');
+  assert.equal(p.mkid, 'amzn1.mp.o.A2EUQ1WTGCTBG2');
+  assert.equal(p.paid, 'amzn1.pa.d.EXAMPLEPAIDIDFORTESTS');
+  assert.equal(p.host, 'sellercentral.amazon.com');
+});
+
+test('parseSwitchUrl declines anything that is not a URL', () => {
+  assert.equal(parseSwitchUrl('amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS'), null);
+  assert.equal(parseSwitchUrl(''), null);
+  assert.equal(parseSwitchUrl(undefined), null);
+  assert.equal(parseSwitchUrl('sellercentral.amazon.com?x=1'), null, 'needs a scheme');
+});
+
+test('a URL without the merchant parameter reports it rather than guessing', () => {
+  const p = parseSwitchUrl('https://sellercentral.amazon.com/home?mons_sel_mkid=amzn1.mp.o.ATVPDKIKX0DER');
+  assert.equal(p.mcid, null);
+  assert.equal(p.mkid, 'amzn1.mp.o.ATVPDKIKX0DER');
+});
+
+test('the host tells NA and EU URLs apart', () => {
+  const eu = /amazon\.(co\.uk|de|fr|it|es)$/;
+  assert.equal(eu.test(parseSwitchUrl(SWITCH_URL).host), false);
+  assert.equal(eu.test(parseSwitchUrl(
+    'https://sellercentral.amazon.co.uk/x?mons_sel_dir_mcid=amzn1.merchant.d.AAAAAAAAAAAA').host), true);
+  assert.equal(eu.test(parseSwitchUrl(
+    'https://sellercentral.amazon.de/x?mons_sel_dir_mcid=amzn1.merchant.d.AAAAAAAAAAAA').host), true);
+});
+
+test('recognises the paid id shape', () => {
+  assert.equal(looksLikePaid('amzn1.pa.d.EXAMPLEPAIDIDFORTESTS'), true);
+  assert.equal(looksLikePaid('amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS'), false);
+  assert.equal(looksLikePaid('amzn1.mp.o.ATVPDKIKX0DER'), false);
 });

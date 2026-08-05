@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { REGIONS, DOWNLOAD_DIR, merchantId } from './config.js';
+import { REGIONS, DOWNLOAD_DIR, merchantId, paidId } from './config.js';
 import { SessionExpiredError } from './errors.js';
 import { sleep } from './dates.js';
 import { log } from './log.js';
@@ -107,6 +107,12 @@ export function withMarketplace(mp, path) {
   const url = new URL(path, `https://${mp.host}`);
   url.searchParams.set('mons_sel_dir_mcid', merchantId(mp.code));
   url.searchParams.set('mons_sel_mkid', mp.marketplaceId);
+
+  // Part of the URL Seller Central itself produces. Sent when known, omitted
+  // when not — a wrong value here is worse than an absent one.
+  const paid = paidId();
+  if (paid) url.searchParams.set('mons_sel_dir_paid', paid);
+
   url.searchParams.set('ignore_selection_changed', 'true');
   return url.toString();
 }

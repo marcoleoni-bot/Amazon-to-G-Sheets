@@ -16,7 +16,7 @@ const MARKETPLACE_IDS = new Set(
 /**
  * Merchant IDs come in two shapes and Seller Central uses both:
  *
- *   amzn1.merchant.d.AB6YW7FYB5RHAC5LMULWP6GQDWFQ   current form
+ *   amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS    current form
  *   A2K8LM3PQ9WXYZ                                  legacy merchant token
  *
  * The trailing (?![A-Z0-9]) matters more than it looks. Without it the legacy
@@ -27,6 +27,40 @@ const MARKETPLACE_IDS = new Set(
 const MODERN = 'amzn1\\.merchant\\.d\\.[A-Z0-9]{10,60}';
 const LEGACY = 'A[A-Z0-9]{11,19}';
 const TOKEN = `(?:${MODERN}|${LEGACY})(?![A-Z0-9])`;
+
+/** mons_sel_dir_paid — one per account, the same across NA and EU. */
+const PAID = 'amzn1\\.pa\\.d\\.[A-Z0-9]{10,60}';
+
+export function looksLikePaid(value) {
+  return new RegExp(`^${PAID}$`).test(String(value || ''));
+}
+
+/**
+ * Accept a whole switch URL in place of a bare ID.
+ *
+ * Copying an address bar is what people actually do, and asking someone to
+ * extract one substring from a URL containing three near-identical opaque IDs
+ * is a good way to get the wrong one.
+ */
+export function parseSwitchUrl(input) {
+  const text = String(input || '');
+  if (!/^https?:\/\//i.test(text)) return null;
+
+  let url;
+  try {
+    url = new URL(text);
+  } catch {
+    return null;
+  }
+
+  const q = url.searchParams;
+  return {
+    host: url.host,
+    mcid: q.get('mons_sel_dir_mcid') || null,
+    mkid: q.get('mons_sel_mkid') || null,
+    paid: q.get('mons_sel_dir_paid') || null,
+  };
+}
 
 /** Ordered by how much the surrounding context proves it really is the merchant. */
 const PATTERNS = [

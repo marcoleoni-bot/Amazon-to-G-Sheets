@@ -146,7 +146,17 @@ export function merchantId(code) {
   if (cached) return cached;
 
   throw new Error(
-    `No merchant token for ${region.key}. Either set ${region.merchantIdEnv}, or run:\n`
-    + '    npm run whoami\n'
-    + '  which reads it out of your saved session. NA and EU have different tokens.');
+    `No merchant ID for ${region.key}. Either set ${region.merchantIdEnv}, or paste a\n`
+    + '  marketplace-switch URL from your browser:\n'
+    + `    npm run whoami -- ${region.key} "https://sellercentral.amazon...?mons_sel_dir_mcid=..."\n`
+    + '  NA and EU have different merchant IDs.');
+}
+
+/**
+ * mons_sel_dir_paid. One value per account, shared by NA and EU, and part of
+ * the URL Seller Central itself produces when switching marketplace. Optional
+ * here: if we don't have it, the parameter is omitted rather than guessed.
+ */
+export function paidId() {
+  return process.env.AMZN_PAID_ID || cachedMerchantIds().paid || null;
 }

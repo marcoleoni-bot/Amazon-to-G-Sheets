@@ -4,6 +4,7 @@ import { REGIONS, MERCHANT_CACHE } from './config.js';
 import { openRegion, gotoWithRetry } from './browser.js';
 import {
   discoverMerchantId, isPlaceholder, looksLikeToken, isMarketplaceId,
+  parseSwitchUrl, looksLikePaid,
 } from './merchant-id.js';
 import { log, heading } from './log.js';
 
@@ -34,8 +35,42 @@ const found = existsSync(MERCHANT_CACHE)
   : {};
 let problems = 0;
 
-// Manual route: npm run whoami -- NA A2K8LM3PQ9WXYZ
+// Manual route. Accepts either a bare ID or a whole switch URL:
+//   npm run whoami -- NA "https://sellercentral.amazon.com/...?mons_sel_dir_mcid=..."
+//   npm run whoami -- NA amzn1.merchant.d.YOURMERCHANTIDHERE
 if (manual) {
+  const parsed = parseSwitchUrl(manual);
+
+  if (parsed) {
+    if (!parsed.mcid) {
+      log.fail('that URL has no mons_sel_dir_mcid parameter.');
+      log.info('Switch marketplace in the browser first — the parameter only appears in the');
+      log.info('URL the switch produces, not on a page you navigated to directly.');
+      process.exit(2);
+    }
+
+    // A .co.uk URL recorded as NA would poison every North American pull.
+    const euHost = /amazon\.(co\.uk|de|fr|it|es)$/.test(parsed.host);
+    const expectedEu = only === 'EU';
+    if (euHost !== expectedEu) {
+      log.fail(`that is ${euHost ? 'an EU' : 'a North American'} URL (${parsed.host}), `
+        + `but you are recording ${only}.`);
+      process.exit(2);
+    }
+
+    found[only] = parsed.mcid;
+    if (parsed.paid && looksLikePaid(parsed.paid)) found.paid = parsed.paid;
+
+    mkdirSync(dirname(MERCHANT_CACHE), { recursive: true });
+    writeFileSync(MERCHANT_CACHE, `${JSON.stringify(found, null, 2)}\n`);
+
+    log.ok(`Recorded ${only} merchant ID ${parsed.mcid}`);
+    if (found.paid) log.ok(`Recorded mons_sel_dir_paid ${found.paid} (shared by both regions)`);
+    if (parsed.mkid) log.info(`(the marketplace in that URL was ${parsed.mkid} — not needed, `
+      + 'all seven are already configured)');
+    process.exit(0);
+  }
+
   if (isMarketplaceId(manual)) {
     log.fail(`"${manual}" is a marketplace ID, not a merchant ID.`);
     log.info('They sit next to each other in the same URL and look alike:');
@@ -45,7 +80,7 @@ if (manual) {
   }
   if (isPlaceholder(manual) || !looksLikeToken(manual)) {
     log.fail(`"${manual}" is not a merchant ID. Expected either `
-      + 'amzn1.merchant.d.AB6YW7FYB5RHAC5LMULWP6GQDWFQ (current form) '
+      + 'amzn1.merchant.d.EXAMPLEMERCHANTIDFORTESTS (current form) '
       + 'or A2K8LM3PQ9WXYZ (legacy form).');
     process.exit(2);
   }
