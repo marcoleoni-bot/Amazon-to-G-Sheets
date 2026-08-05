@@ -87,3 +87,33 @@ test('every marketplace id keeps the amzn1.mp.o. prefix', () => {
       `${code} would silently no-op without the prefix`);
   }
 });
+
+const { marketplaceFromLabel } = await import('../src/browser.js');
+
+test('the marketplace picker label identifies the marketplace', () => {
+  assert.equal(marketplaceFromLabel('United Kingdom').code, 'UK');
+  assert.equal(marketplaceFromLabel('Germany').code, 'DE');
+  assert.equal(marketplaceFromLabel('Deutschland').code, 'DE');
+  assert.equal(marketplaceFromLabel('Amazon.co.uk').code, 'UK');
+  assert.equal(marketplaceFromLabel('España').code, 'ES');
+  assert.equal(marketplaceFromLabel('Italia').code, 'IT');
+});
+
+test('the picker is the only way to tell DE, FR, IT and ES apart', () => {
+  // They share the "-EU" SKU suffix, so the downloaded file cannot distinguish
+  // them. If this ever stops working, those four lose their only real check.
+  const seen = new Set();
+  for (const [label, code] of [['Germany', 'DE'], ['France', 'FR'],
+    ['Italy', 'IT'], ['Spain', 'ES']]) {
+    const hit = marketplaceFromLabel(label);
+    assert.equal(hit.code, code);
+    seen.add(hit.code);
+  }
+  assert.equal(seen.size, 4, 'all four must be distinguishable by label');
+});
+
+test('an unrecognised label names nothing rather than guessing', () => {
+  assert.equal(marketplaceFromLabel('Seller Central'), null);
+  assert.equal(marketplaceFromLabel(''), null);
+  assert.equal(marketplaceFromLabel(undefined), null);
+});

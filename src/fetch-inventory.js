@@ -8,11 +8,13 @@ import { INVENTORY } from './selectors-loader.js';
 import { findFirst, toLocator } from './locate.js';
 import { parseReport } from './parse.js';
 import { verifyMarketplace } from './verify-marketplace.js';
+import { MarketplaceMismatchError } from './errors.js';
 import { sleep } from './dates.js';
 import { log } from './log.js';
 
 const POLL_INTERVAL_MS = 30_000;
 const POLL_TIMEOUT_MS = Number(process.env.REPORT_WAIT_MS || 15 * 60_000);
+const MAX_ATTEMPTS = Number(process.env.MARKETPLACE_ATTEMPTS || 3);
 
 /**
  * Read the report table into something we can reason about. Report Central
@@ -130,8 +132,8 @@ const ageHours = (d) => (d ? (Date.now() - d.getTime()) / 3_600_000 : null);
  * you rate-limited; taking the newest ready one and *proving* it belongs to the
  * right marketplace gets you correct data without the fight.
  */
-function pickReadyRow(rows) {
-  const ready = rows.filter((r) => r.links?.length && !r.pending);
+function pickReadyRow(rows, alreadyTried = new Set()) {
+  const ready = rows.filter((r) => r.links?.length && !r.pending && !alreadyTried.has(r.text));
   if (!ready.length) return null;
 
   const dated = ready.filter((r) => r.date);
@@ -144,9 +146,67 @@ function pickReadyRow(rows) {
   return { row: newest, ageHours: age };
 }
 
+/** Ask Report Central to generate a fresh report for the selected marketplace. */
+async function requestFresh(page, code, region) {
+  const button = await findFirst(page, INVENTORY.requestDownload, { timeout: 20_000 });
+  if (!button) {
+    throw new Error(
+      `${code}: could not find the "Request .csv Download" button. Re-record with `
+      + `npm run record:${region.toLowerCase()} and update INVENTORY.requestDownload.`);
+  }
+  await button.locator.click();
+}
+
+/** Poll until a ready report appears that we have not already rejected. */
+async function waitForReport(page, code, url, dayFirst, tried) {
+  const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let rows = [];
+  let polls = 0;
+
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL_MS);
+    await gotoWithRetry(page, url);
+    rows = await readReportRows(page, dayFirst);
+    const pick = pickReadyRow(rows, tried);
+    if (pick) return pick;
+    polls += 1;
+
+    const mins = Math.round((deadline - Date.now()) / 60_000);
+    const ready = rows.filter((r) => r.links?.length).length;
+    // Say why, not just how long. A ready report the selectors cannot see looks
+    // exactly like a report that is not ready, and the difference matters.
+    log.info(`${code}: no new downloadable report yet — ${rows.length} row(s), `
+      + `${ready} with a download link (${mins} min left)`);
+    if (polls === 2 || polls === 6) {
+      log.warn(`${code}: if a report looks ready in the browser, the selectors are missing it:`);
+      console.error(await describePage(page, rows));
+    }
+  }
+
+  throw new Error(`${code}: no downloadable report after `
+    + `${Math.round(POLL_TIMEOUT_MS / 60_000)} minutes.\n`
+    + `${await describePage(page, rows)}\n`
+    + '  If a report IS ready in the browser, this is a selector problem, not a timing\n'
+    + '  one — update INVENTORY.downloadLink in src/selectors.js.');
+}
+
+/**
+ * Fetch, verify, and retry on contamination.
+ *
+ * Selecting a marketplace does not reliably determine which marketplace's file
+ * Report Central hands back. The same UK request returned a clean UK file on one
+ * run and an EU file thirty minutes later, from identical code. So the ready
+ * report is a candidate, not an answer: download it, prove it belongs to the
+ * marketplace we asked for, and if it does not, reject that row and try again —
+ * first any other ready report, then a freshly generated one.
+ *
+ * Requesting a fresh report is the reliable move but also the throttled one, so
+ * it is the fallback rather than the default.
+ */
 export async function fetchInventory(page, code) {
   const mp = marketplace(code);
   const url = withMarketplace(mp, FBA_INVENTORY_REPORT_PATH);
+  const dayFirst = mp.region === 'EU';
 
   log.step(`${code} inventory — ${mp.marketplaceId}`);
 
@@ -156,77 +216,70 @@ export async function fetchInventory(page, code) {
 
   if (!active.confirmed) {
     log.warn(`${code}: could not confirm the active marketplace from the page `
-      + `(${active.how}); falling back to the SKU-suffix check on the downloaded file`);
+      + `(${active.how}); relying on the SKU check of the downloaded file`);
   }
 
-  const dayFirst = mp.region === 'EU';
-  let rows = await readReportRows(page, dayFirst);
-  let pick = pickReadyRow(rows);
+  const tried = new Set();
+  let lastMismatch = null;
+  let rowsCache = await readReportRows(page, dayFirst);
 
-  if (!pick) {
-    log.step(`${code}: no ready report within ${REPORT_MAX_AGE_HOURS}h — requesting a new one`);
-    const button = await findFirst(page, INVENTORY.requestDownload, { timeout: 20_000 });
-    if (!button) {
-      throw new Error(
-        `${code}: could not find the "Request .csv Download" button. Re-record with `
-        + `npm run record:${mp.region.toLowerCase()} and update INVENTORY.requestDownload.`);
-    }
-    await button.locator.click();
-
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    let polls = 0;
-    while (Date.now() < deadline && !pick) {
-      await sleep(POLL_INTERVAL_MS);
-      await gotoWithRetry(page, url);
-      rows = await readReportRows(page, dayFirst);
-      pick = pickReadyRow(rows);
-      polls += 1;
-
-      if (!pick) {
-        const mins = Math.round((deadline - Date.now()) / 60_000);
-        const ready = rows.filter((r) => r.links?.length).length;
-        // Say why, not just how long. A ready report that the selectors cannot
-        // see looks exactly like a report that is not ready, and the difference
-        // matters enormously.
-        log.info(`${code}: no downloadable report yet — ${rows.length} row(s) on the page, `
-          + `${ready} with a download link (${mins} min left)`);
-        if (polls === 2 || polls === 6) {
-          log.warn(`${code}: if the report looks ready in the browser, the selectors are `
-            + 'missing it. What the page shows:');
-          console.error(await describePage(page, rows));
-        }
-      }
-    }
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    let pick = pickReadyRow(rowsCache, tried);
     if (!pick) {
-      throw new Error(`${code}: no downloadable report after `
-        + `${Math.round(POLL_TIMEOUT_MS / 60_000)} minutes.\n`
-        + `${await describePage(page, rows)}\n`
-        + '  If the report IS ready in the browser, this is a selector problem, not a\n'
-        + '  timing one — update INVENTORY.downloadLink in src/selectors.js.');
+      rowsCache = await readReportRows(page, dayFirst);
+      pick = pickReadyRow(rowsCache, tried);
+    }
+
+    if (!pick) {
+      log.step(`${code}: requesting a fresh report (attempt ${attempt}/${MAX_ATTEMPTS})`);
+      await requestFresh(page, code, mp.region);
+      pick = await waitForReport(page, code, url, dayFirst, tried);
+    }
+
+    const age = pick.ageHours === null ? 'unknown age' : `${pick.ageHours.toFixed(1)}h old`;
+    log.step(`${code}: downloading report (${age})`);
+
+    const { buffer, suggestedFilename, how } = await downloadReport(page, pick.row.links);
+    log.step(`${code}: got ${suggestedFilename || 'report'} by ${how}`);
+
+    const parsed = parseReport(buffer);
+
+    try {
+      const check = verifyMarketplace({ code, header: parsed.header, rows: parsed.rows });
+
+      log.ok(`${code} inventory — ${parsed.rows.length} rows, ${parsed.header.length} columns, `
+        + `${parsed.delimiter}-separated; ${check.note}`);
+
+      return {
+        kind: 'inventory',
+        code,
+        mp,
+        header: parsed.header,
+        rows: parsed.rows,
+        delimiter: parsed.delimiter,
+        marketplaceCheck: check,
+        activeMarketplaceCheck: active,
+        filename: suggestedFilename,
+        attempts: attempt,
+      };
+    } catch (err) {
+      if (!(err instanceof MarketplaceMismatchError)) throw err;
+
+      lastMismatch = err;
+      tried.add(pick.row.text);
+      log.warn(`${code}: attempt ${attempt} got the wrong marketplace `
+        + `(looks like ${err.evidence.looksLike}) — rejecting that report and retrying`);
+
+      // Re-select before the next attempt; the selection may be what drifted.
+      await selectMarketplace(page, mp);
+      await gotoWithRetry(page, url);
+      rowsCache = await readReportRows(page, dayFirst);
     }
   }
 
-  const age = pick.ageHours === null ? 'unknown age' : `${pick.ageHours.toFixed(1)}h old`;
-  log.step(`${code}: downloading report (${age})`);
-
-  const { buffer, suggestedFilename, how } = await downloadReport(page, pick.row.links);
-  log.step(`${code}: got ${suggestedFilename || 'report'} by ${how}`);
-
-  const parsed = parseReport(buffer);
-  const check = verifyMarketplace({ code, header: parsed.header, rows: parsed.rows });
-
-  log.ok(`${code} inventory — ${parsed.rows.length} rows, ${parsed.header.length} columns, `
-    + `${parsed.delimiter}-separated; ${check.note}`);
-
-  return {
-    kind: 'inventory',
-    code,
-    mp,
-    header: parsed.header,
-    rows: parsed.rows,
-    delimiter: parsed.delimiter,
-    marketplaceCheck: check,
-    activeMarketplaceCheck: active,
-    filename: suggestedFilename,
-  };
+  throw new Error(
+    `${code}: could not obtain a report for the right marketplace in ${MAX_ATTEMPTS} attempts.\n`
+    + `  Last mismatch: ${lastMismatch?.message}\n`
+    + '  Nothing was written. This is the contamination guard doing its job — the data\n'
+    + '  Report Central served did not belong to the marketplace that was requested.');
 }

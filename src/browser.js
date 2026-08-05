@@ -126,6 +126,42 @@ export function withMarketplace(mp, path) {
 }
 
 /**
+ * How each marketplace names itself in the header picker, in the languages
+ * Seller Central renders it in.
+ */
+export const MARKETPLACE_LABELS = {
+  US: [/united states/i, /amazon\.com\b/i],
+  CA: [/\bcanada\b/i, /amazon\.ca\b/i],
+  UK: [/united kingdom/i, /amazon\.co\.uk\b/i],
+  DE: [/\bgermany\b/i, /deutschland/i, /amazon\.de\b/i],
+  FR: [/\bfrance\b/i, /amazon\.fr\b/i],
+  IT: [/\bital(y|ia)\b/i, /amazon\.it\b/i],
+  ES: [/\bspain\b/i, /espa[ñn]a/i, /amazon\.es\b/i],
+};
+
+/** Match a picker's visible text to a marketplace, or null if it names none. */
+export function marketplaceFromLabel(text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return null;
+  for (const [code, patterns] of Object.entries(MARKETPLACE_LABELS)) {
+    if (patterns.some((re) => re.test(clean))) return { code, label: clean.slice(0, 60) };
+  }
+  return null;
+}
+
+async function readMarketplacePicker(page) {
+  const picker = page.locator([
+    '#sc-mkt-picker-switcher-select',
+    '[data-testid*="marketplace" i]',
+    '[id*="mkt-picker" i]',
+    '[aria-label*="marketplace" i]',
+  ].join(', ')).first();
+
+  if (!await picker.count().catch(() => 0)) return null;
+  return marketplaceFromLabel(await picker.innerText().catch(() => ''));
+}
+
+/**
  * Select a marketplace, then land on the target page as a separate step.
  *
  * Doing the switch on the report URL itself is what produced a Canadian request
@@ -164,6 +200,22 @@ export async function assertActiveMarketplace(page, mp) {
   // there ourselves a moment ago, so finding it proves nothing. That check
   // reported "confirmed" on every run while the page served another
   // marketplace's data entirely.
+
+  // The marketplace picker in the header names the current marketplace in
+  // words. For DE/FR/IT/ES this is the only signal there is — they all share
+  // the "-EU" SKU suffix, so the file itself cannot tell them apart.
+  const picked = await readMarketplacePicker(page);
+  if (picked) {
+    if (picked.code === mp.code) {
+      return { confirmed: true, how: `marketplace picker reads "${picked.label}"` };
+    }
+    const { MarketplaceMismatchError } = await import('./errors.js');
+    throw new MarketplaceMismatchError(mp.code, {
+      looksLike: picked.code,
+      detail: `the marketplace picker reads "${picked.label}". The switch did not take effect.`,
+    });
+  }
+
   const html = await page.content().catch(() => '');
   const selectedPattern = (id) => new RegExp(
     `(selectedMarketplaceId|currentMarketplaceId|marketplaceId)"?\\s*[:=]\\s*"?(amzn1\\.mp\\.o\\.)?${id}`, 'i');
