@@ -2,7 +2,7 @@ import {
   marketplace, FBA_INVENTORY_REPORT_PATH, REPORT_MAX_AGE_HOURS,
 } from './config.js';
 import {
-  gotoWithRetry, withMarketplace, assertActiveMarketplace, downloadReport,
+  gotoWithRetry, withMarketplace, selectMarketplace, downloadReport,
 } from './browser.js';
 import { INVENTORY } from './selectors-loader.js';
 import { findFirst, toLocator } from './locate.js';
@@ -148,10 +148,12 @@ export async function fetchInventory(page, code) {
   const mp = marketplace(code);
   const url = withMarketplace(mp, FBA_INVENTORY_REPORT_PATH);
 
-  log.step(`${code} inventory — ${mp.host}`);
+  log.step(`${code} inventory — ${mp.marketplaceId}`);
+
+  // Switch first, land second. Combining the two served the wrong marketplace.
+  const active = await selectMarketplace(page, mp);
   await gotoWithRetry(page, url);
 
-  const active = await assertActiveMarketplace(page, mp);
   if (!active.confirmed) {
     log.warn(`${code}: could not confirm the active marketplace from the page `
       + `(${active.how}); falling back to the SKU-suffix check on the downloaded file`);

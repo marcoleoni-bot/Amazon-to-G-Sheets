@@ -105,7 +105,14 @@ export async function assertSignedIn(page) {
  * them produces no error, just the wrong data.
  */
 export function withMarketplace(mp, path) {
-  const url = new URL(path, `https://${mp.host}`);
+  // Always the region's own host, never the marketplace's.
+  //
+  // The session cookies are per-domain. Signing in on sellercentral.amazon.co.uk
+  // gets you nothing on sellercentral.amazon.de — that host redirects straight
+  // to /ap/signin and looks exactly like an expired session. One session per
+  // region means one host per region; the marketplace is chosen by parameter,
+  // not by domain.
+  const url = new URL(path, `https://${REGIONS[mp.region].loginHost}`);
   url.searchParams.set('mons_sel_dir_mcid', merchantId(mp.code));
   url.searchParams.set('mons_sel_mkid', mp.marketplaceId);
 
@@ -116,6 +123,21 @@ export function withMarketplace(mp, path) {
 
   url.searchParams.set('ignore_selection_changed', 'true');
   return url.toString();
+}
+
+/**
+ * Select a marketplace, then land on the target page as a separate step.
+ *
+ * Doing the switch on the report URL itself is what produced a Canadian request
+ * returning the US file: the page renders its report list before — or without —
+ * the marketplace selection taking effect, so the list is whatever was selected
+ * last. Switching on a neutral page first, and only then navigating, gives the
+ * selection somewhere to land.
+ */
+export async function selectMarketplace(page, mp) {
+  await gotoWithRetry(page, withMarketplace(mp, '/home'));
+  await sleep(2000);
+  return assertActiveMarketplace(page, mp);
 }
 
 /**
@@ -138,10 +160,10 @@ export async function assertActiveMarketplace(page, mp) {
     ES: 'A1RKKUPIHCS9HS',
   }).filter(([code]) => code !== mp.code);
 
-  if (page.url().includes(bare)) {
-    return { confirmed: true, how: 'marketplace id present in the URL' };
-  }
-
+  // Deliberately NOT checking page.url() for the marketplace id: we put it
+  // there ourselves a moment ago, so finding it proves nothing. That check
+  // reported "confirmed" on every run while the page served another
+  // marketplace's data entirely.
   const html = await page.content().catch(() => '');
   const selectedPattern = (id) => new RegExp(
     `(selectedMarketplaceId|currentMarketplaceId|marketplaceId)"?\\s*[:=]\\s*"?(amzn1\\.mp\\.o\\.)?${id}`, 'i');

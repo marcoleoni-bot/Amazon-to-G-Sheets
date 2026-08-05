@@ -248,3 +248,31 @@ test('SchemaChangedError carries the diff, not just a message', () => {
   assert.equal(err.diff.added[0].name, 'extra');
   assert.match(err.message, /US inventory/);
 });
+
+test('a contamination error names example SKUs, not just counts', () => {
+  // Counts alone cannot distinguish "wrong file" from "our suffix convention
+  // was recorded wrong". The SKUs themselves can.
+  const header = ['sku', 'asin'];
+  const rows = [['ABC-123', 'B1'], ['DEF-456', 'B2'], ['GHI-789', 'B3']];
+  try {
+    verifyMarketplace({ code: 'UK', header, rows });
+    assert.fail('should have thrown');
+  } catch (err) {
+    assert.match(err.message, /Example SKUs/);
+    assert.match(err.message, /ABC-123/);
+    assert.match(err.message, /do not use the suffix/);
+  }
+});
+
+test('a mixed file reports examples from every class it saw', () => {
+  const header = ['sku'];
+  const rows = [...Array(6).fill(['X-UK1']), ...Array(4).fill(['Y-EU'])];
+  try {
+    verifyMarketplace({ code: 'UK', header, rows });
+    assert.fail('should have thrown');
+  } catch (err) {
+    assert.match(err.message, /X-UK1/);
+    assert.match(err.message, /Y-EU/);
+    assert.match(err.message, /60\.0%/);
+  }
+});

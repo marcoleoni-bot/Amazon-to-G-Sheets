@@ -58,11 +58,25 @@ test('the paid id is shared by both regions', () => {
 test('switch URLs carry merchant, marketplace and paid, each in its own parameter', () => {
   clearEnv();
   const url = new URL(withMarketplace(marketplace('DE'), '/reportcentral/X/1'));
-  assert.equal(url.host, 'sellercentral.amazon.de', 'each marketplace has its own host');
   assert.equal(url.searchParams.get('mons_sel_dir_mcid'), 'amzn1.merchant.d.EUMERCHANTFROMCACHE');
   assert.equal(url.searchParams.get('mons_sel_mkid'), 'amzn1.mp.o.A1PA6795UKMFR9');
   assert.equal(url.searchParams.get('mons_sel_dir_paid'), 'amzn1.pa.d.PAIDFROMCACHE');
   assert.equal(url.searchParams.get('ignore_selection_changed'), 'true');
+});
+
+test('every marketplace is reached on its region host, not its own domain', () => {
+  // Session cookies are per-domain. sellercentral.amazon.de redirects a
+  // .co.uk session straight to /ap/signin, which is indistinguishable from an
+  // expired session — so the marketplace is chosen by parameter, not by host.
+  clearEnv();
+  for (const code of ['UK', 'DE', 'FR', 'IT', 'ES']) {
+    assert.equal(new URL(withMarketplace(marketplace(code), '/x')).host,
+      'sellercentral.amazon.co.uk', `${code} must stay on the EU host`);
+  }
+  for (const code of ['US', 'CA']) {
+    assert.equal(new URL(withMarketplace(marketplace(code), '/x')).host,
+      'sellercentral.amazon.com', `${code} must stay on the NA host`);
+  }
 });
 
 test('every marketplace id keeps the amzn1.mp.o. prefix', () => {

@@ -17,8 +17,18 @@ import { columnIndex } from './parse.js';
 /** Fraction of rows that must agree with the requested marketplace. */
 const DOMINANCE = Number(process.env.MARKETPLACE_DOMINANCE || 0.8);
 
-/** Longest suffixes first, so "-UK1" is tested before any shorter match. */
-const SIGNALS = [
+/**
+ * The SKU suffix each marketplace's listings carry.
+ *
+ * This is a property of THIS SELLER'S naming convention, not of Amazon, so it
+ * is the first thing to correct if the marketplace check misfires. Longest
+ * suffixes first, so "-UK1" is tested before any shorter match. Set
+ * SKU_SIGNALS_JSON to override without editing code, e.g.
+ *   SKU_SIGNALS_JSON='[{"suffix":"-UK","label":"UK"}]'
+ */
+export const SKU_SIGNALS = process.env.SKU_SIGNALS_JSON
+  ? JSON.parse(process.env.SKU_SIGNALS_JSON)
+  : [
   { suffix: '-UK1', label: 'UK' },
   { suffix: '-CA', label: 'CA' },
   { suffix: '-EU', label: 'EU-pool (DE/FR/IT/ES)' },
@@ -26,7 +36,7 @@ const SIGNALS = [
 
 export function classifySku(sku) {
   const s = String(sku || '').trim();
-  for (const { suffix, label } of SIGNALS) {
+  for (const { suffix, label } of SKU_SIGNALS) {
     if (s.toUpperCase().endsWith(suffix)) return label;
   }
   return s ? 'US (no suffix)' : 'blank';
@@ -80,9 +90,12 @@ export function verifyMarketplace({ code, header, rows, sampleSize = 400 }) {
   }
 
   const counts = new Map();
+  const examples = new Map();
   for (const sku of sample) {
     const cls = classifySku(sku);
     counts.set(cls, (counts.get(cls) || 0) + 1);
+    if (!examples.has(cls)) examples.set(cls, []);
+    if (examples.get(cls).length < 3) examples.get(cls).push(sku);
   }
 
   const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
@@ -90,12 +103,23 @@ export function verifyMarketplace({ code, header, rows, sampleSize = 400 }) {
   const share = topCount / sample.length;
   const distribution = ranked.map(([k, v]) => `${k}=${v}`).join(', ');
 
+  // Show the actual SKUs. The suffix convention is a property of *this
+  // account's* naming, not of Amazon, so a mismatch is as likely to mean the
+  // convention was recorded wrong as it is to mean the file is the wrong one.
+  // Counts alone cannot tell those apart; example SKUs can.
+  const witness = ranked
+    .map(([cls]) => `      ${cls}: ${examples.get(cls).join(', ')}`)
+    .join('\n');
+
   if (topClass !== expected) {
     throw new MarketplaceMismatchError(code, {
       looksLike: topClass,
       detail: `${topCount}/${sample.length} sampled SKUs classify as "${topClass}", `
-        + `expected "${expected}". Distribution: ${distribution}. `
-        + 'Report Central almost certainly served the previously selected marketplace.',
+        + `expected "${expected}".\n    Distribution: ${distribution}\n    Example SKUs:\n${witness}\n`
+        + '    Either Report Central served another marketplace\'s file, or this account\'s\n'
+        + `    ${code} SKUs do not use the suffix this bot was told to expect — the example\n`
+        + '    SKUs above will tell you which. To correct the convention, see SKU_SIGNALS\n'
+        + '    in src/verify-marketplace.js.',
     });
   }
 
@@ -103,8 +127,8 @@ export function verifyMarketplace({ code, header, rows, sampleSize = 400 }) {
     throw new MarketplaceMismatchError(code, {
       looksLike: 'a mixture',
       detail: `only ${(share * 100).toFixed(1)}% of sampled SKUs classify as "${expected}" `
-        + `(threshold ${(DOMINANCE * 100).toFixed(0)}%). Distribution: ${distribution}. `
-        + 'A mixed file usually means a stale download was reused.',
+        + `(threshold ${(DOMINANCE * 100).toFixed(0)}%).\n    Distribution: ${distribution}\n`
+        + `    Example SKUs:\n${witness}`,
     });
   }
 
