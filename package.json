@@ -1,0 +1,26 @@
+{
+  "name": "amazon-report-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pulls FBA inventory + business reports from Seller Central into the OPS Intelligence Hub.",
+  "scripts": {
+    "login": "node src/login.js",
+    "check": "node src/check.js",
+    "record:na": "playwright codegen --load-storage=.state/na.json https://sellercentral.amazon.com",
+    "record:eu": "playwright codegen --load-storage=.state/eu.json https://sellercentral.amazon.co.uk",
+    "baseline": "node src/baseline.js",
+    "test": "node --test test/*.js",
+    "try": "node src/try.js",
+    "start": "node src/index.js",
+    "postinstall": "playwright install chromium"
+  },
+  "dependencies": {
+    "csv-parse": "^5.5.6",
+    "googleapis": "^140.0.1",
+    "playwright": "^1.47.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

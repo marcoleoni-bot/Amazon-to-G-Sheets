@@ -1,0 +1,9 @@
+node_modules/
+.state/
+downloads/
+run.log
+*.local.js
+config.local.json
+service-account*.json
+.env
+.DS_Store
