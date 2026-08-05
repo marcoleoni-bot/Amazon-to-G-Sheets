@@ -46,12 +46,16 @@ Then Google credentials: create a service account, enable the Sheets API, downlo
 
 ```bash
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
-export NA_MERCHANT_ID=A1XXXXXXXXXXXX     # see below
-export EU_MERCHANT_ID=A2XXXXXXXXXXXX     # different from NA
 export ALERT_WEBHOOK=https://n8n.operationautopilot.com/webhook/amazon-bot   # optional
 ```
 
-Merchant IDs: switch marketplace once in the browser and read `mons_sel_dir_mcid` out of the URL. NA and EU differ.
+**Merchant tokens.** NA and EU have different ones and both are needed. Easiest:
+
+```bash
+npm run whoami          # reads them out of your saved sessions → .state/merchants.json
+```
+
+That exists because Settings → Account Info → Merchant Token is gated to the primary account holder — a secondary user cannot read their own token from the UI, but it is present in every signed-in page's markup. Failing that, switch marketplace once in the browser and read `mons_sel_dir_mcid` out of the address bar, then set `NA_MERCHANT_ID` and `EU_MERCHANT_ID` (an environment variable overrides the cache file).
 
 Then:
 
@@ -65,6 +69,7 @@ npm run check               # preflight: sessions, IDs, baselines, tabs, date wi
 
 ```bash
 npm run login -- NA|EU              # manual sign-in, saves cookies only
+npm run whoami                      # discover merchant tokens from the saved sessions
 npm run check                       # preflight, writes nothing
 npm run try -- inventory US         # one pull, validated, printed, not written
 npm run try -- sales DE 30          # ditto; HEADED=1 to watch it

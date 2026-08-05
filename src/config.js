@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+
 /**
  * Static configuration: marketplaces, regions, tab names, windows.
  *
@@ -108,13 +110,43 @@ export function regionOf(code) {
   return REGIONS[marketplace(code).region];
 }
 
+export const MERCHANT_CACHE = '.state/merchants.json';
+
+/** Values like A1XXXXXXXXXXXX are the setup placeholder, not a token. */
+const isPlaceholder = (v) => /^A\d?X{6,}$/i.test(String(v || ''));
+
+function cachedMerchantIds() {
+  try {
+    return JSON.parse(readFileSync(MERCHANT_CACHE, 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Resolution order: environment variable, then the cache written by
+ * `npm run whoami`. Sending a placeholder to Amazon produces a page that looks
+ * fine and serves the wrong account's data, so it is rejected up front.
+ */
 export function merchantId(code) {
   const region = regionOf(code);
-  const id = process.env[region.merchantIdEnv];
-  if (!id) {
+  const fromEnv = process.env[region.merchantIdEnv];
+
+  if (fromEnv && !isPlaceholder(fromEnv)) return fromEnv;
+
+  if (isPlaceholder(fromEnv)) {
     throw new Error(
-      `${region.merchantIdEnv} is not set. Switch marketplace once in the browser and read `
-      + `mons_sel_dir_mcid out of the URL — NA and EU have different merchant IDs.`);
+      `${region.merchantIdEnv} is set to "${fromEnv}", which is the placeholder from the `
+      + 'setup instructions, not a real merchant token.\n'
+      + '  Discover the real one from your saved session:  npm run whoami\n'
+      + '  Or switch marketplace once in the browser and read mons_sel_dir_mcid out of the URL.');
   }
-  return id;
+
+  const cached = cachedMerchantIds()[region.key];
+  if (cached) return cached;
+
+  throw new Error(
+    `No merchant token for ${region.key}. Either set ${region.merchantIdEnv}, or run:\n`
+    + '    npm run whoami\n'
+    + '  which reads it out of your saved session. NA and EU have different tokens.');
 }

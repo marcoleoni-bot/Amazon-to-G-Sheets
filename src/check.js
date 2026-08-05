@@ -1,6 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
 import {
   REGIONS, MARKETPLACES, INVENTORY_PULLS, SALES_TABS, WINDOWS, SPREADSHEET_ID, INCLUSIVE_END,
+  merchantId, MERCHANT_CACHE,
 } from './config.js';
 import { listSchemas } from './schema-store.js';
 import { SALES, salesRecorded } from './selectors.js';
@@ -30,10 +31,17 @@ for (const [key, region] of Object.entries(REGIONS)) {
 }
 
 heading('Merchant IDs');
-for (const [key, region] of Object.entries(REGIONS)) {
-  if (process.env[region.merchantIdEnv]) log.ok(`${key}: ${region.merchantIdEnv} set`);
-  else bad(`${key}: ${region.merchantIdEnv} not set — read mons_sel_dir_mcid out of the URL `
-    + 'after switching marketplace once in the browser');
+for (const key of Object.keys(REGIONS)) {
+  // Resolve exactly the way a real run will, so a placeholder is caught here
+  // rather than three minutes into a headless fetch.
+  const sample = key === 'NA' ? 'US' : 'UK';
+  try {
+    const id = merchantId(sample);
+    const source = process.env[REGIONS[key].merchantIdEnv] ? 'environment' : MERCHANT_CACHE;
+    log.ok(`${key}: ${id.slice(0, 4)}${'•'.repeat(Math.max(id.length - 4, 0))} (from ${source})`);
+  } catch (err) {
+    bad(`${key}: ${err.message}`);
+  }
 }
 
 heading('Marketplaces');
