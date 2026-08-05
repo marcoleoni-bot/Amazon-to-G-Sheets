@@ -13,7 +13,20 @@ import { MARKETPLACES } from './config.js';
 const MARKETPLACE_IDS = new Set(
   Object.values(MARKETPLACES).map((m) => m.marketplaceId.replace('amzn1.mp.o.', '')));
 
-const TOKEN = '[A-Z0-9]{12,20}';
+/**
+ * Merchant IDs come in two shapes and Seller Central uses both:
+ *
+ *   amzn1.merchant.d.AB6YW7FYB5RHAC5LMULWP6GQDWFQ   current form
+ *   A2K8LM3PQ9WXYZ                                  legacy merchant token
+ *
+ * The trailing (?![A-Z0-9]) matters more than it looks. Without it the legacy
+ * pattern happily matches the first 20 characters of a 28-character modern ID
+ * and yields a truncated string that is the right shape and completely wrong —
+ * which Amazon would accept, then serve someone else's data for.
+ */
+const MODERN = 'amzn1\\.merchant\\.d\\.[A-Z0-9]{10,60}';
+const LEGACY = 'A[A-Z0-9]{11,19}';
+const TOKEN = `(?:${MODERN}|${LEGACY})(?![A-Z0-9])`;
 
 /** Ordered by how much the surrounding context proves it really is the merchant. */
 const PATTERNS = [
@@ -30,14 +43,24 @@ const PATTERNS = [
   { name: 'ld_mcid cookie value', re: new RegExp(`ld_mcid["'=:\\s]+(${TOKEN})`, 'g') },
 ];
 
-/** A plausible merchant token: starts with A, uppercase alphanumeric, right length. */
+/** A plausible merchant ID, in either the modern or the legacy shape. */
 export function looksLikeToken(value) {
-  return /^A[A-Z0-9]{11,19}$/.test(String(value || ''));
+  return new RegExp(`^(?:${MODERN}|${LEGACY})$`).test(String(value || ''));
 }
 
 /** Reject the placeholder from the setup instructions rather than sending it to Amazon. */
 export function isPlaceholder(value) {
   return /^A\d?X{6,}$/i.test(String(value || ''));
+}
+
+/**
+ * A marketplace ID is a different thing that looks confusingly similar and sits
+ * next to the merchant ID in the same URL. Pasting one where the other belongs
+ * does not error — it silently selects the wrong thing.
+ */
+export function isMarketplaceId(value) {
+  const v = String(value || '');
+  return v.startsWith('amzn1.mp.o.') || MARKETPLACE_IDS.has(v.replace('amzn1.mp.o.', ''));
 }
 
 /**
@@ -48,7 +71,7 @@ export function extractMerchantIds(html, cookies = []) {
   const hits = new Map(); // token -> Set of source names
 
   const record = (token, source) => {
-    if (!looksLikeToken(token) || MARKETPLACE_IDS.has(token)) return;
+    if (!looksLikeToken(token) || isMarketplaceId(token)) return;
     if (!hits.has(token)) hits.set(token, new Set());
     hits.get(token).add(source);
   };
@@ -57,11 +80,13 @@ export function extractMerchantIds(html, cookies = []) {
     for (const m of String(html || '').matchAll(re)) record(m[1], name);
   }
 
+  // Cookie values are scanned whole rather than split on punctuation — the
+  // modern ID contains dots, so splitting would shred it.
+  const bare = new RegExp(TOKEN, 'g');
   for (const cookie of cookies) {
-    if (/mcid|merchant|seller/i.test(cookie.name || '')) {
-      for (const part of String(cookie.value || '').split(/[^A-Z0-9]+/i)) {
-        record(part, `cookie ${cookie.name}`);
-      }
+    if (!/mcid|merchant|seller/i.test(cookie.name || '')) continue;
+    for (const m of String(cookie.value || '').matchAll(bare)) {
+      record(m[0], `cookie ${cookie.name}`);
     }
   }
 

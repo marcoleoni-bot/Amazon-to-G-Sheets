@@ -2,7 +2,9 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { REGIONS, MERCHANT_CACHE } from './config.js';
 import { openRegion, gotoWithRetry } from './browser.js';
-import { discoverMerchantId, isPlaceholder, looksLikeToken } from './merchant-id.js';
+import {
+  discoverMerchantId, isPlaceholder, looksLikeToken, isMarketplaceId,
+} from './merchant-id.js';
 import { log, heading } from './log.js';
 
 /**
@@ -34,9 +36,17 @@ let problems = 0;
 
 // Manual route: npm run whoami -- NA A2K8LM3PQ9WXYZ
 if (manual) {
+  if (isMarketplaceId(manual)) {
+    log.fail(`"${manual}" is a marketplace ID, not a merchant ID.`);
+    log.info('They sit next to each other in the same URL and look alike:');
+    log.info('  mons_sel_mkid=amzn1.mp.o.…       ← marketplace (already configured)');
+    log.info('  mons_sel_dir_mcid=amzn1.merchant.d.…  ← merchant (what is needed here)');
+    process.exit(2);
+  }
   if (isPlaceholder(manual) || !looksLikeToken(manual)) {
-    log.fail(`"${manual}" is not a merchant token. Expected something like A2K8LM3PQ9WXYZ — `
-      + 'starts with A, 12-20 uppercase letters and digits.');
+    log.fail(`"${manual}" is not a merchant ID. Expected either `
+      + 'amzn1.merchant.d.AB6YW7FYB5RHAC5LMULWP6GQDWFQ (current form) '
+      + 'or A2K8LM3PQ9WXYZ (legacy form).');
     process.exit(2);
   }
   found[only] = manual;

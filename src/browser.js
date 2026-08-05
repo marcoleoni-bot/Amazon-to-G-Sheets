@@ -92,12 +92,21 @@ export async function assertSignedIn(page) {
   }
 }
 
-/** Marketplace-switch parameters. Without the amzn1.mp.o. prefix this no-ops. */
+/**
+ * Marketplace-switch parameters.
+ *
+ *   mons_sel_dir_mcid  which seller account   amzn1.merchant.d.…
+ *   mons_sel_mkid      which marketplace      amzn1.mp.o.…
+ *
+ * Both need their prefix; without it the switch silently no-ops and the page
+ * serves whatever was selected before. They are easy to mix up — they sit
+ * beside each other in the URL and have the same general shape — and swapping
+ * them produces no error, just the wrong data.
+ */
 export function withMarketplace(mp, path) {
   const url = new URL(path, `https://${mp.host}`);
   url.searchParams.set('mons_sel_dir_mcid', merchantId(mp.code));
   url.searchParams.set('mons_sel_mkid', mp.marketplaceId);
-  url.searchParams.set('mons_sel_dir_paid', mp.marketplaceId);
   url.searchParams.set('ignore_selection_changed', 'true');
   return url.toString();
 }

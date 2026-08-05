@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  extractMerchantIds, looksLikeToken, isPlaceholder, looksSignedOut,
+  extractMerchantIds, looksLikeToken, isPlaceholder, looksSignedOut, isMarketplaceId,
 } from '../src/merchant-id.js';
 
 const REAL = 'A2K8LM3PQ9WXYZ';
@@ -106,4 +106,42 @@ test('finds tokens in the newer markup shapes', () => {
     assert.ok(top, `nothing found for ${label}`);
     assert.equal(top.token, REAL, label);
   }
+});
+
+const MODERN_ID = 'amzn1.merchant.d.AB6YW7FYB5RHAC5LMULWP6GQDWFQ';
+
+test('accepts both the modern and legacy merchant id shapes', () => {
+  assert.equal(looksLikeToken(MODERN_ID), true);
+  assert.equal(looksLikeToken(REAL), true);
+  assert.equal(looksLikeToken('amzn1.merchant.d.'), false, 'prefix alone is not an id');
+  assert.equal(looksLikeToken('amzn1.mp.o.ATVPDKIKX0DER'), false, 'that is a marketplace id');
+});
+
+test('a modern id is never truncated to a legacy-shaped fragment', () => {
+  // The bug this guards: A[A-Z0-9]{11,19} matches the first 20 characters of
+  // AB6YW7FYB5RHAC5LMULWP6GQDWFQ, producing a wrong id of the right shape.
+  const [top] = extractMerchantIds(`<a href="/x?mons_sel_dir_mcid=${MODERN_ID}">m</a>`);
+  assert.equal(top.token, MODERN_ID);
+  assert.ok(!top.token.endsWith('LMULW'), 'must not be a 20-char truncation');
+});
+
+test('marketplace ids are rejected however they are written', () => {
+  assert.equal(isMarketplaceId('amzn1.mp.o.ATVPDKIKX0DER'), true);
+  assert.equal(isMarketplaceId('ATVPDKIKX0DER'), true, 'bare marketplace id too');
+  assert.equal(isMarketplaceId('amzn1.mp.o.A1F83G8C2ARO7P'), true);
+  assert.equal(isMarketplaceId(MODERN_ID), false);
+  assert.equal(isMarketplaceId(REAL), false);
+});
+
+test('a real switcher URL yields the merchant, not the marketplace beside it', () => {
+  const html = `<a href="/home?mons_sel_dir_mcid=${MODERN_ID}`
+    + '&mons_sel_mkid=amzn1.mp.o.A1PA6795UKMFR9">Germany</a>';
+  const found = extractMerchantIds(html);
+  assert.equal(found.length, 1);
+  assert.equal(found[0].token, MODERN_ID);
+});
+
+test('modern ids survive being read out of a cookie', () => {
+  const [top] = extractMerchantIds('', [{ name: 'ld_mcid', value: MODERN_ID }]);
+  assert.equal(top.token, MODERN_ID, 'splitting on dots would have shredded this');
 });
