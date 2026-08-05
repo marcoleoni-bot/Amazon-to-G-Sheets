@@ -110,7 +110,14 @@ export function regionOf(code) {
   return REGIONS[marketplace(code).region];
 }
 
-export const MERCHANT_CACHE = '.state/merchants.json';
+export const MERCHANT_CACHE = process.env.MERCHANT_CACHE || '.state/merchants.json';
+
+const warned = new Set();
+const warnOnce = (msg) => {
+  if (warned.has(msg)) return;
+  warned.add(msg);
+  console.warn(`  ! ${msg}`);
+};
 
 /** Values like A1XXXXXXXXXXXX are the setup placeholder, not a token. */
 const isPlaceholder = (v) => /^A\d?X{6,}$/i.test(String(v || ''));
@@ -131,18 +138,26 @@ function cachedMerchantIds() {
 export function merchantId(code) {
   const region = regionOf(code);
   const fromEnv = process.env[region.merchantIdEnv];
+  const cached = cachedMerchantIds()[region.key];
 
   if (fromEnv && !isPlaceholder(fromEnv)) return fromEnv;
 
+  // A placeholder is not configuration — it is a leftover. When a real ID has
+  // been recorded, use it and say so, rather than dead-ending on a value that
+  // was never meant to be kept.
   if (isPlaceholder(fromEnv)) {
+    if (cached) {
+      warnOnce(`${region.merchantIdEnv} is set to the placeholder "${fromEnv}" — ignoring it `
+        + `and using ${MERCHANT_CACHE}. Delete that line from your shell profile.`);
+      return cached;
+    }
     throw new Error(
       `${region.merchantIdEnv} is set to "${fromEnv}", which is the placeholder from the `
-      + 'setup instructions, not a real merchant token.\n'
-      + '  Discover the real one from your saved session:  npm run whoami\n'
-      + '  Or switch marketplace once in the browser and read mons_sel_dir_mcid out of the URL.');
+      + 'setup instructions, not a real merchant ID.\n'
+      + '  Delete that line from ~/.zshrc, then record the real one by pasting a\n'
+      + '  marketplace-switch URL:  npm run whoami -- ' + region.key + ' "https://..."');
   }
 
-  const cached = cachedMerchantIds()[region.key];
   if (cached) return cached;
 
   throw new Error(
