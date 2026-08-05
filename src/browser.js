@@ -170,11 +170,87 @@ export async function captureDownload(page, trigger, { timeout = 180_000 } = {})
     page.waitForEvent('download', { timeout }),
     trigger(),
   ]);
+  return { buffer: await readDownload(download), suggestedFilename: download.suggestedFilename() };
+}
+
+async function readDownload(download) {
   const stream = await download.createReadStream();
   const chunks = [];
   for await (const chunk of stream) chunks.push(chunk);
-  return {
-    buffer: Buffer.concat(chunks),
-    suggestedFilename: download.suggestedFilename(),
-  };
+  return Buffer.concat(chunks);
+}
+
+function filenameFromResponse(res, url) {
+  const disposition = res.headers()['content-disposition'] || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+  return match ? decodeURIComponent(match[1]) : url.split('/').pop().split('?')[0];
+}
+
+/**
+ * Get the report bytes from any of several candidate controls.
+ *
+ * Two strategies per candidate, cheapest first:
+ *
+ *   1. Fetch the href directly through the browser's own request context, which
+ *      shares its cookies. Deterministic — no click, no download event, no
+ *      dependence on which element happens to be on top.
+ *   2. Click it and wait for a download event.
+ *
+ * Trying several candidates matters because a click on the wrong element does
+ * not fail — it silently does nothing, and the run hangs waiting for a download
+ * that was never going to start. That is exactly what happened when a stray
+ * link was clicked instead of the real Download button.
+ */
+export async function downloadReport(page, links, { perAttempt = 45_000 } = {}) {
+  const problems = [];
+  const startedAt = page.url();
+
+  for (const link of links) {
+    const label = (await link.innerText().catch(() => '') || '')
+      .replace(/\s+/g, ' ').trim().slice(0, 40) || '(unlabelled)';
+    const href = await link.getAttribute('href').catch(() => null);
+
+    if (href && !/^#|^javascript:/i.test(href)) {
+      const absolute = new URL(href, page.url()).toString();
+      try {
+        const res = await page.context().request.get(absolute, { timeout: perAttempt });
+        const contentType = res.headers()['content-type'] || '';
+        const body = res.ok() ? await res.body() : Buffer.alloc(0);
+
+        // An HTML body means we fetched a page, not a report.
+        if (body.length && !/text\/html/i.test(contentType)) {
+          return {
+            buffer: body,
+            suggestedFilename: filenameFromResponse(res, absolute),
+            how: `direct fetch via "${label}"`,
+          };
+        }
+        problems.push(`"${label}": fetch gave ${res.status()} ${contentType || 'no content-type'}`);
+      } catch (err) {
+        problems.push(`"${label}": ${err.message.split('\n')[0]}`);
+      }
+    }
+
+    try {
+      const [download] = await Promise.all([
+        page.waitForEvent('download', { timeout: perAttempt }),
+        link.click({ timeout: 15_000 }),
+      ]);
+      return {
+        buffer: await readDownload(download),
+        suggestedFilename: download.suggestedFilename(),
+        how: `click on "${label}"`,
+      };
+    } catch {
+      problems.push(`"${label}": clicked, no download within ${perAttempt / 1000}s`);
+      // A misfired click may have navigated; get back before trying the next one.
+      if (page.url() !== startedAt) {
+        await gotoWithRetry(page, startedAt).catch(() => {});
+      }
+    }
+  }
+
+  throw new Error(
+    `None of the ${links.length} download candidate(s) produced a file:\n    `
+    + problems.join('\n    '));
 }

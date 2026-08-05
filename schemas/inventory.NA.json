@@ -1,8 +1,8 @@
 {
   "key": "inventory.NA",
-  "provisional": true,
-  "note": "US/CA FBA Manage Inventory. Positions 1-22 are pinned by the layout Calc_Data already depends on (afn-fc-transfer-quantity at 22/V). Positions 23-24 are reconstructed and need confirming against a real download: npm run baseline -- inventory US",
-  "recordedAt": "2026-08-05T00:00:00.000Z",
+  "provisional": false,
+  "note": "US/CA FBA Manage Inventory. Verified against a real US download on 2026-08-05: 24 columns, afn-fc-transfer-quantity at 22/V. Any mismatch from here is a genuine upstream change \u2014 check Calc_Data's column letters before accepting it.",
+  "recordedAt": "2026-08-05T11:17:28.000Z",
   "columnCount": 24,
   "columns": [
     "sku",
@@ -27,7 +27,7 @@
     "afn-reserved-future-supply",
     "afn-future-supply-buyable",
     "afn-fc-transfer-quantity",
-    "afn-fc-processing-quantity",
+    "afn-onhand-buyable-quantity",
     "store"
   ]
 }

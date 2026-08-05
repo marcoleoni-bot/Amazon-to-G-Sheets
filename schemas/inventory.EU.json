@@ -1,7 +1,7 @@
 {
   "key": "inventory.EU",
   "provisional": true,
-  "note": "UK/DE FBA Manage Inventory. Europe inserts afn-fulfillable-quantity-local and -remote at 22-23, which pushes afn-fc-transfer-quantity to 24/X — that offset against NA's 22/V is the reason these tabs must never be normalised into one shape. Positions 25-26 are reconstructed and need confirming: npm run baseline -- inventory UK",
+  "note": "UK/DE FBA Manage Inventory. Derived from the verified NA layout by inserting afn-fulfillable-quantity-local and -remote at 22-23, which puts afn-fc-transfer-quantity at 24/X against NA's 22/V. That offset is why these tabs must never be normalised into one shape. Still provisional until a real UK download confirms it: npm run baseline -- inventory UK",
   "recordedAt": "2026-08-05T00:00:00.000Z",
   "columnCount": 26,
   "columns": [
@@ -29,7 +29,7 @@
     "afn-fulfillable-quantity-local",
     "afn-fulfillable-quantity-remote",
     "afn-fc-transfer-quantity",
-    "afn-fc-processing-quantity",
+    "afn-onhand-buyable-quantity",
     "store"
   ]
 }

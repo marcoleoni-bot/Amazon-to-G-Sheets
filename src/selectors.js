@@ -46,14 +46,17 @@ export const INVENTORY = {
    * counted down fifteen minutes.
    */
   downloadLink: [
-    { css: 'a[href*="downloadReport" i]' },
-    { css: 'a[href*="download" i][href*="report" i]' },
+    // Visible label first. An href-based match will happily select a help page
+    // called "How to download reports", which clicks fine and downloads nothing.
+    { role: 'button', name: /^\s*download/i },
+    { role: 'link', name: /^\s*download/i },
+    { role: 'button', name: /^\s*(herunterladen|télécharger|telecharger|descargar|scarica)/i },
+    { role: 'link', name: /^\s*(herunterladen|télécharger|telecharger|descargar|scarica)/i },
     { css: 'a[download]' },
-    { role: 'link', name: /download/i },
+    { css: 'a[href*="downloadReport" i]' },
+    { css: 'a[href*="download" i][href*="report" i]:not([href*="help" i])' },
     { role: 'button', name: /download/i },
-    { role: 'link', name: /herunterladen|télécharger|telecharger|descargar|scarica/i },
-    { role: 'button', name: /herunterladen|télécharger|telecharger|descargar|scarica/i },
-    { css: 'a[href*="/download" i]' },
+    { role: 'link', name: /download/i },
   ],
 
   /** Text that means "this row is not ready yet". */

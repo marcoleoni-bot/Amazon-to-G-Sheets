@@ -2,7 +2,7 @@ import {
   marketplace, FBA_INVENTORY_REPORT_PATH, REPORT_MAX_AGE_HOURS,
 } from './config.js';
 import {
-  gotoWithRetry, withMarketplace, assertActiveMarketplace, captureDownload,
+  gotoWithRetry, withMarketplace, assertActiveMarketplace, downloadReport,
 } from './browser.js';
 import { INVENTORY } from './selectors-loader.js';
 import { findFirst, toLocator } from './locate.js';
@@ -19,14 +19,15 @@ const POLL_TIMEOUT_MS = Number(process.env.REPORT_WAIT_MS || 15 * 60_000);
  * lists newest first; each row is either still generating or carries a
  * download link.
  */
-async function findDownloadLink(scope) {
+async function findDownloadLinks(scope) {
+  const found = [];
   for (const descriptor of INVENTORY.downloadLink) {
     const candidate = toLocator(scope, descriptor).first();
     if (await candidate.count().catch(() => 0)) {
-      if (await candidate.isVisible().catch(() => false)) return candidate;
+      if (await candidate.isVisible().catch(() => false)) found.push(candidate);
     }
   }
-  return null;
+  return found;
 }
 
 /**
@@ -52,18 +53,18 @@ async function readReportRows(page, dayFirst = false) {
       const text = (await row.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
       if (!text) continue;
 
-      const link = await findDownloadLink(row);
+      const links = await findDownloadLinks(row);
       const pending = INVENTORY.pendingText.some((re) => re.test(text));
-      out.push({ index: i, text, link, pending, date: parseRowDate(text, dayFirst) });
+      out.push({ index: i, text, links, pending, date: parseRowDate(text, dayFirst) });
     }
-    if (out.some((r) => r.link)) return out;
+    if (out.some((r) => r.links.length)) return out;
   }
 
   // Nothing usable in a table — is there a download link anywhere on the page?
-  const loose = await findDownloadLink(page);
-  if (loose) {
+  const loose = await findDownloadLinks(page);
+  if (loose.length) {
     const text = (await page.innerText('body').catch(() => '')).replace(/\s+/g, ' ').slice(0, 400);
-    return [{ index: 0, text, link: loose, pending: false, date: parseRowDate(text, dayFirst) }];
+    return [{ index: 0, text, links: loose, pending: false, date: parseRowDate(text, dayFirst) }];
   }
 
   return table ? [] : [];
@@ -72,9 +73,9 @@ async function readReportRows(page, dayFirst = false) {
 /** What the page actually showed, for when the poller finds nothing. */
 async function describePage(page, rows) {
   const lines = [];
-  lines.push(`rows seen: ${rows.length}, with a download link: ${rows.filter((r) => r.link).length}`);
+  lines.push(`rows seen: ${rows.length}, with a download link: ${rows.filter((r) => r.links?.length).length}`);
   for (const r of rows.slice(0, 6)) {
-    lines.push(`  [${r.link ? 'link' : '    '}${r.pending ? ' pending' : ''}] ${r.text.slice(0, 120)}`);
+    lines.push(`  [${r.links?.length ? 'link' : '    '}${r.pending ? ' pending' : ''}] ${r.text.slice(0, 120)}`);
   }
   const anchors = await page.evaluate(() =>
     Array.from(document.querySelectorAll('a, button'))
@@ -130,7 +131,7 @@ const ageHours = (d) => (d ? (Date.now() - d.getTime()) / 3_600_000 : null);
  * right marketplace gets you correct data without the fight.
  */
 function pickReadyRow(rows) {
-  const ready = rows.filter((r) => r.link && !r.pending);
+  const ready = rows.filter((r) => r.links?.length && !r.pending);
   if (!ready.length) return null;
 
   const dated = ready.filter((r) => r.date);
@@ -181,7 +182,7 @@ export async function fetchInventory(page, code) {
 
       if (!pick) {
         const mins = Math.round((deadline - Date.now()) / 60_000);
-        const ready = rows.filter((r) => r.link).length;
+        const ready = rows.filter((r) => r.links?.length).length;
         // Say why, not just how long. A ready report that the selectors cannot
         // see looks exactly like a report that is not ready, and the difference
         // matters enormously.
@@ -206,8 +207,8 @@ export async function fetchInventory(page, code) {
   const age = pick.ageHours === null ? 'unknown age' : `${pick.ageHours.toFixed(1)}h old`;
   log.step(`${code}: downloading report (${age})`);
 
-  const { buffer, suggestedFilename } = await captureDownload(
-    page, () => pick.row.link.click());
+  const { buffer, suggestedFilename, how } = await downloadReport(page, pick.row.links);
+  log.step(`${code}: got ${suggestedFilename || 'report'} by ${how}`);
 
   const parsed = parseReport(buffer);
   const check = verifyMarketplace({ code, header: parsed.header, rows: parsed.rows });
