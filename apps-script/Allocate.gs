@@ -22,15 +22,24 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
 
   function slot(sku) {
     var k = normSku(sku);
-    if (!bySku[k]) bySku[k] = { awd: [], fba: [], available: 0, minUnits: 0, fbaDoi: null };
+    if (!bySku[k]) {
+      bySku[k] = { awd: [], fba: [], available: 0, minUnits: 0, fbaDoi: null,
+        floorKnown: true };
+    }
     return bySku[k];
+  }
+
+  function noteFloor(s, r) {
+    // null means the floor could not be read, which is not the same as zero.
+    if (r.minUnits === null || r.minUnits === undefined) s.floorKnown = false;
+    else s.minUnits = Math.max(s.minUnits, r.minUnits);
   }
 
   awdRows.forEach(function (r, i) {
     var s = slot(r.sku);
     s.awd.push(i);
     s.available = Math.max(s.available, r.tacAvailableUnits);
-    s.minUnits = Math.max(s.minUnits, r.minUnits);
+    noteFloor(s, r);
     if (s.fbaDoi === null && r.fbaDoi !== undefined && r.fbaDoi !== null) s.fbaDoi = r.fbaDoi;
   });
 
@@ -38,12 +47,13 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
     var s = slot(r.sku);
     s.fba.push(i);
     s.available = Math.max(s.available, r.tacAvailableUnits);
-    s.minUnits = Math.max(s.minUnits, r.minUnits);
+    noteFloor(s, r);
     // The FBA lane's own AMZ_DOI is the authoritative figure for the 40 test.
     s.fbaDoi = r.amzDoi;
   });
 
   var headroomUnits = {};
+  var floorUnknown = [];
 
   Object.keys(bySku).forEach(function (k) {
     var s = bySku[k];
@@ -53,8 +63,22 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
       return fbaDec[i] && fbaDec[i].floorBreachAllowed && fbaDec[i].cases > 0;
     });
 
-    var floor = breach ? 0 : s.minUnits;
+    // Above the floor is shared. The floor itself is a reserve that only
+    // Tactical > FBA may dip into, and only on the §7.1 exception — that lane
+    // ships SPD, so a small rescue quantity is cheap. Tactical > AWD is
+    // palletised and may never breach the floor to make up a pallet.
+    var floor = s.minUnits;
     var pool = clampMin0(s.available - floor);
+    var reserve = breach ? floor : 0;
+
+    if (!s.floorKnown) {
+      // An unauthorised IMPORTRANGE leaves #REF! where the floor should be.
+      // Drawing on a floor we cannot see is how Tactical gets emptied, so
+      // this SKU does not move until someone can read it.
+      floorUnknown.push(k);
+      pool = 0;
+      reserve = 0;
+    }
 
     // §8: below 40 FBA DOI, FBA is served first; otherwise AWD is.
     var fbaFirst = s.fbaDoi !== null && s.fbaDoi < R.FBA_DOI_CONTENTION;
@@ -71,11 +95,17 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
         if (!d || d.cases <= 0) return;
 
         var wanted = d.cases;
-        var affordable = casesIn(pool, r.caseQty);
+        var isFba = lane.rows === fbaRows;
+        var budget = pool + (isFba ? reserve : 0);
+        var affordable = casesIn(budget, r.caseQty);
 
         if (wanted > affordable) {
           d.cases = clampMin0(affordable);
-          if (d.cases === 0 && floor > 0) {
+          if (d.cases === 0 && !s.floorKnown) {
+            d.rule = 'Tactical floor unreadable (#REF!) — not drawing on Tactical';
+            d.notes = [];
+            addFlag(d, 'NEEDS_REVIEW');
+          } else if (d.cases === 0 && floor > 0) {
             d.rule = 'Tactical floor (min ' + fmt(floor) + ' units) reached';
             d.notes = [];
           } else if (laneNo === 1) {
@@ -88,19 +118,28 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
           }
         }
 
-        if (breach && d.cases > 0 && lane.rows === fbaRows) {
+        var take = d.cases * r.caseQty;
+        if (breach && isFba && take > pool) {
           addFlag(d, 'FLOOR_BREACH');
-          addNote(d, 'floor breached: ' + (d.floorBreachNote || 'exception'));
+          addNote(d, 'floor breached by ' + fmt(take - pool) + ' units (SPD): '
+            + (d.floorBreachNote || 'exception'));
         }
 
-        pool = clampMin0(pool - d.cases * r.caseQty);
+        // Spend the shared pool first, then the reserve — which only the FBA
+        // lane was given a budget against.
+        if (take <= pool) {
+          pool -= take;
+        } else {
+          reserve = clampMin0(reserve - (take - pool));
+          pool = 0;
+        }
       });
     });
 
     headroomUnits[k] = pool;
   });
 
-  return { headroomUnits: headroomUnits };
+  return { headroomUnits: headroomUnits, floorUnknown: floorUnknown };
 }
 
 /**
@@ -163,10 +202,15 @@ function planUsTransferOrders(input, cfg) {
     awdToFba: awdFbaDec,
     tacToFba: tacFbaDec,
     pallet: pallet,
+    floorUnknown: alloc.floorUnknown,
     verdicts: {
-      tacToAwd: laneVerdict('Tactical → AWD', input.tacToAwd, tacAwdDec, tacAwdVerdict),
+      tacToAwd: withFloorWarning(
+        laneVerdict('Tactical → AWD', input.tacToAwd, tacAwdDec, tacAwdVerdict),
+        alloc.floorUnknown),
       awdToFba: laneVerdict('AWD → FBA', input.awdToFba, awdFbaDec, null),
-      tacToFba: laneVerdict('Tactical → FBA', input.tacToFba, tacFbaDec, null),
+      tacToFba: withFloorWarning(
+        laneVerdict('Tactical → FBA', input.tacToFba, tacFbaDec, null),
+        alloc.floorUnknown),
     },
     totals: {
       tacToAwdCases: sumCases(tacAwdDec),
@@ -211,6 +255,21 @@ function laneVerdict(label, rows, decisions, pre) {
     why: skus + ' SKU' + (skus === 1 ? '' : 's') + ', ' + cases + ' cases'
       + (pre && pre.why ? ' — ' + pre.why : ''),
   };
+}
+
+/**
+ * A floor nobody could read is not a floor of zero, and a run that drew on one
+ * is not a run you want to discover afterwards. Say it on the verdict.
+ */
+function withFloorWarning(verdict, floorUnknown) {
+  if (!floorUnknown || !floorUnknown.length) return verdict;
+  verdict.floorUnknown = floorUnknown.length;
+  verdict.why = '⚠ Tactical floor unreadable for ' + floorUnknown.length
+    + ' SKU' + (floorUnknown.length === 1 ? '' : 's') + ' ('
+    + floorUnknown.slice(0, 3).join(', ')
+    + (floorUnknown.length > 3 ? '…' : '') + ') — those are held. '
+    + 'Run Transfer Orders → Authorise data sources, then run again. ' + verdict.why;
+  return verdict;
 }
 
 function sumCases(dec) {

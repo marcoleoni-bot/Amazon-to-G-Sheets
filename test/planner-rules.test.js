@@ -552,6 +552,93 @@ test('the Tactical floor binds both lanes together, not each on its own', () => 
   assert.match(G.reasonText(fbaDec[0], 20), /Tactical floor \(min 240 units\) reached/);
 });
 
+// ------------------------------------------------- the floor, and reading it
+
+test('an unreadable floor stops the draw instead of reading as zero', () => {
+  // What actually went wrong on the first live run: the IMPORTRANGE feeding
+  // column B was not yet authorised, so the floor arrived as #REF!. Read as 0
+  // it let five SKUs with a floor of 100 be drawn down to nothing.
+  const c = cfg();
+  const awdRow = tacAwdRow({ sku: '101-2003', tacAvailableUnits: 100,
+    availableCases: 5, caseQty: 20, minUnits: null, awdDoi: 32, fbaDoi: 78,
+    wrDoi: 5 });
+  const awdDec = [G.decision(5, 'sending all available', { pass: 'PASS_3' })];
+
+  const res = G.allocateTactical([awdRow], awdDec, [], [], c);
+  assert.equal(awdDec[0].cases, 0, 'nothing moves on a floor we cannot see');
+  assert.match(awdDec[0].rule, /floor unreadable \(#REF!\)/);
+  assert.deepEqual(plain(res.floorUnknown), ['101-2003']);
+});
+
+test('a known floor of zero still allows the draw', () => {
+  const c = cfg();
+  const awdRow = tacAwdRow({ sku: 'FREE', tacAvailableUnits: 100,
+    availableCases: 5, caseQty: 20, minUnits: 0 });
+  const awdDec = [G.decision(5, 'sending all available', { pass: 'PASS_3' })];
+  G.allocateTactical([awdRow], awdDec, [], [], c);
+  assert.equal(awdDec[0].cases, 5, 'zero is a floor; unknown is not');
+});
+
+test('only the SPD lane may dip below the floor, never the pallet lane', () => {
+  // §7.1 lets Tactical > FBA rescue a critically low SKU. Tactical > AWD is
+  // palletised, so it may never breach the floor to make up a pallet.
+  const c = cfg();
+  const shared = { sku: 'X', tacAvailableUnits: 300, minUnits: 240, caseQty: 20 };
+  const awdRow = tacAwdRow({ ...shared, availableCases: 15, awdDoi: 0, wrDoi: 100 });
+  const fbaRow = tacFbaRow({ ...shared, availableCases: 15, amzDoi: 10,
+    amzTotal: 100, rate: 10 });
+
+  const awdDec = [G.decision(10, 'baseline 60 DOI', { pass: 'PASS_3' })];
+  const fbaDec = [G.decision(6, 'residual after AWD', { pass: 'PASS_2' })];
+  fbaDec[0].floorBreachAllowed = true;
+  fbaDec[0].floorBreachNote = 'AWD empty, FBA under 30 DOI';
+
+  G.allocateTactical([awdRow], awdDec, [fbaRow], fbaDec, c);
+
+  // FBA is served first at 10 DOI, and may reach into the 240-unit reserve.
+  assert.equal(fbaDec[0].cases, 6, 'the SPD rescue goes in full');
+  assert.ok(fbaDec[0].flags.includes('FLOOR_BREACH'));
+  assert.match(G.reasonText(fbaDec[0], 20), /floor breached by \d+ units \(SPD\)/);
+  assert.equal(awdDec[0].cases, 0, 'the pallet lane gets none of the reserve');
+});
+
+// ------------------------------------------------------------------ urgency
+
+test('urgency is days of cover at the destination', () => {
+  assert.equal(G.urgencyOf({ amzDoi: 12, awdDoi: 90 }), 12, 'FBA-bound lanes');
+  assert.equal(G.urgencyOf({ awdDoi: 40 }), 40, 'Tactical > AWD');
+  assert.equal(G.urgencyOf({}), 999999, 'unknown sorts last, not first');
+});
+
+test('the urgency ramp runs red to green and never skips a band', () => {
+  const c = cfg();
+  const seen = [5, 20, 35, 50, 75, 300].map((d) => G.urgencyColour(d, c));
+  assert.equal(seen[0], '#e06666', 'about to stock out');
+  assert.equal(seen[seen.length - 1], '#b6d7a8', 'months of cover');
+  assert.equal(new Set(seen).size, 6, 'each band is distinct');
+  for (const d of [0, 15, 60, 999999, 1e9]) {
+    assert.match(G.urgencyColour(d, c), /^#[0-9a-f]{6}$/i, `no gap at ${d}`);
+  }
+});
+
+test('outputs lead with whatever runs out first, not with the alphabet', () => {
+  const c = cfg();
+  const rows = [
+    awdFbaRow({ sku: 'AAA-COMFORTABLE', amzDoi: 90, amzTotal: 900, rate: 10,
+      caseQty: 20, availableCases: 50, awdAvailableUnits: 1000, awdDoi: 100 }),
+    awdFbaRow({ sku: 'ZZZ-URGENT', amzDoi: 5, amzTotal: 50, rate: 10,
+      caseQty: 20, availableCases: 50, awdAvailableUnits: 1000, awdDoi: 100 }),
+  ];
+  const dec = [G.decision(1, 'x', {}), G.decision(2, 'y', {})];
+  const picks = G.accepted(rows, dec, c);
+  assert.equal(picks[0].row.sku, 'ZZZ-URGENT');
+  assert.equal(picks[1].row.sku, 'AAA-COMFORTABLE');
+
+  const bySku = cfg();
+  bySku.URGENCY.SORT_BY_URGENCY = false;
+  assert.equal(G.accepted(rows, dec, bySku)[0].row.sku, 'AAA-COMFORTABLE');
+});
+
 // ------------------------------------------------------------------ output
 
 test('the reason code leads with the quantity', () => {

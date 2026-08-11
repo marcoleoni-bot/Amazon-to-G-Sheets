@@ -248,9 +248,23 @@ function readPlanningInput(planner, cfg) {
     return p ? p.caseQty : 0;
   }
 
+  /**
+   * The Tactical floor, or null when it genuinely cannot be read.
+   *
+   * Never zero on failure. An unauthorised IMPORTRANGE leaves #REF! in column
+   * B, and reading that as "no floor" is the one direction that empties
+   * Tactical — it is what let a real run draw five SKUs down to zero units
+   * against floors of 100. Unknown has to stay unknown so the lane can refuse
+   * to draw rather than quietly overdraw.
+   */
+  var floorUnknown = [];
   function floorFor(sku, cellValue) {
     var k = normSku(sku);
     if (Object.prototype.hasOwnProperty.call(minUnits.bySku, k)) return minUnits.bySku[k];
+    if (isSheetError(cellValue)) {
+      floorUnknown.push(sku);
+      return null;
+    }
     return num(cellValue);
   }
 
@@ -352,6 +366,7 @@ function readPlanningInput(planner, cfg) {
     },
     meta: {
       minUnitsSource: minUnits.source,
+      floorUnknown: floorUnknown,
       laneSource: cfg.SOURCES.LANES_FROM === 'ims' ? 'IMS' : 'planner',
       criticalCount: Object.keys(critical).length,
       ltfCount: Object.keys(ltfIndex).length,

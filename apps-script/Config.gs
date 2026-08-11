@@ -25,6 +25,15 @@ var CONFIG = {
     MIN_UNITS_ID: '14fW_-GacyK_8JDRE9Z1EomAE87S0rpnsJ9WkxKw7lCE',
 
     /**
+     * Other workbooks this planner imports from. The authoriser also scans the
+     * sheet's own formulas, so this is a safety net for a source that is not
+     * referenced by an IMPORTRANGE the scan can see.
+     */
+    EXTRA_IMPORT_SOURCES: [
+      '1CEMazWrjCanl6Cbld6xpCEl8UOVomNXTbl8-CD7luB0', // Staging_Rates
+    ],
+
+    /**
      * Where the lane input columns are read from.
      *
      *   'planner' — read the planner's own lane tabs, which the template
@@ -355,6 +364,29 @@ var CONFIG = {
     PALLET_FILL: '#efefef',  // light grey
     FLOOR_BREACH_BORDER: '#cc0000',
     HEADER: '#d0e0e3',
+  },
+
+  /**
+   * Urgency, as days of cover at the destination, painted as a ramp.
+   *
+   * Read top to bottom: the first band a SKU falls into wins. Deep red is
+   * about to stock out, green has months of cover. The outputs are sorted on
+   * the same number, so the pick list opens on whatever is closest to running
+   * out rather than on whatever sorts first alphabetically.
+   */
+  URGENCY: {
+    BANDS: [
+      { upTo: 15, colour: '#e06666' },
+      { upTo: 30, colour: '#f6b26b' },
+      { upTo: 45, colour: '#ffd966' },
+      { upTo: 60, colour: '#ffe599' },
+      { upTo: 90, colour: '#d9ead3' },
+      { upTo: 999999, colour: '#b6d7a8' },
+    ],
+    /** Tint the summary tabs as well as the lane tabs. */
+    TINT_SUMMARIES: true,
+    /** Sort every output most-urgent-first. */
+    SORT_BY_URGENCY: true,
   },
 
   /** Month folder names under `Transfer orders`, e.g. `08. August`. */

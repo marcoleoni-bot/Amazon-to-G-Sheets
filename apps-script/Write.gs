@@ -15,6 +15,10 @@ function writePlan(planner, input, plan, cfg, ctx) {
   writeLane(input.sheets.tacToFba, input.tacToFba, plan.tacToFba,
     cfg.COLS.TAC_TO_FBA, cfg, 'Reason');
 
+  tintLaneUrgency(input.sheets.tacToAwd, input.tacToAwd, cfg.COLS.TAC_TO_AWD.AWD_DOI, cfg);
+  tintLaneUrgency(input.sheets.awdToFba, input.awdToFba, cfg.COLS.AWD_TO_FBA.AMZ_DOI, cfg);
+  tintLaneUrgency(input.sheets.tacToFba, input.tacToFba, cfg.COLS.TAC_TO_FBA.AMZ_DOI, cfg);
+
   if (cfg.OUTPUT.WRITE_RECOMPUTED_Y) {
     writeAvailableOnlyDoi(input.sheets.awdToFba, input.awdToFba, cfg);
   }
@@ -88,6 +92,21 @@ function writeLane(sheet, rows, decisions, C, cfg, reasonHeader) {
   });
 }
 
+/**
+ * Ramp the destination-DOI column red to green, so scanning the lane shows
+ * what is close to running out before you read a single number.
+ */
+function tintLaneUrgency(sheet, rows, doiCol, cfg) {
+  if (!sheet || !rows.length) return;
+  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  var span = rows[rows.length - 1].rowIndex - first + 1;
+  var fills = blankColumn(span, null);
+  rows.forEach(function (r) {
+    fills[r.rowIndex - first][0] = urgencyColour(urgencyOf(r), cfg);
+  });
+  sheet.getRange(first, doiCol + 1, span, 1).setBackgrounds(fills);
+}
+
 /** §4 — column Y recomputed on order_plan_rate, so the sheet shows what the rule used. */
 function writeAvailableOnlyDoi(sheet, rows, cfg) {
   if (!sheet || !rows.length) return;
@@ -130,16 +149,44 @@ function colLetter(zeroBased) {
 
 // ----------------------------------------------------------------- summaries
 
-/** Accepted rows for a lane: cases > 0, sorted by SKU so it reads down cleanly. */
+/**
+ * Days of cover at the destination — the number that decides how urgent a row
+ * is. FBA for the two lanes that end there, AWD for Tactical > AWD.
+ */
+function urgencyOf(row) {
+  if (row.amzDoi !== undefined && row.amzDoi !== null) return row.amzDoi;
+  if (row.awdDoi !== undefined && row.awdDoi !== null) return row.awdDoi;
+  return 999999;
+}
+
+/** The first band the cover falls into. */
+function urgencyColour(doi, cfg) {
+  var bands = cfg.URGENCY.BANDS;
+  for (var i = 0; i < bands.length; i++) {
+    if (doi <= bands[i].upTo) return bands[i].colour;
+  }
+  return bands[bands.length - 1].colour;
+}
+
+/**
+ * Accepted rows for a lane: cases > 0, most urgent first.
+ *
+ * Sorted on days of cover rather than SKU, because the question when reading
+ * down a pick list is "what runs out first", and alphabetical order answers a
+ * question nobody asked.
+ */
 function accepted(rows, decisions, cfg) {
   var out = [];
   rows.forEach(function (r, i) {
     var d = decisions[i];
     if (!d || d.cases <= 0) return;
     if (!cfg.OUTPUT.LTF_IN_SUMMARIES && d.flags.indexOf('LTF_FLAG') !== -1) return;
-    out.push({ row: r, dec: d });
+    out.push({ row: r, dec: d, urgency: urgencyOf(r) });
   });
   out.sort(function (a, b) {
+    if (cfg.URGENCY.SORT_BY_URGENCY && a.urgency !== b.urgency) {
+      return a.urgency - b.urgency;
+    }
     return a.row.sku < b.row.sku ? -1 : (a.row.sku > b.row.sku ? 1 : 0);
   });
   return out;
@@ -150,13 +197,29 @@ function amazonSkuFor(input, sku) {
   return p ? p.amazonSku : '';
 }
 
+/** Paint each written summary row by how close it is to running out. */
+function tintByUrgency(sheet, headerRow, picks, width, cfg) {
+  if (!sheet || !picks.length || !cfg.URGENCY.TINT_SUMMARIES) return;
+  var fills = picks.map(function (p) {
+    var c = urgencyColour(p.urgency, cfg);
+    var row = [];
+    for (var i = 0; i < width; i++) row.push(c);
+    return row;
+  });
+  sheet.getRange(headerRow + 1, 1, picks.length, width).setBackgrounds(fills);
+}
+
 /** Replace everything below the header row, so nothing survives from last week. */
 function replaceBelowHeader(sheet, headerRow, rows, width) {
   if (!sheet) return;
   var last = sheet.getLastRow();
   if (last > headerRow) {
-    sheet.getRange(headerRow + 1, 1, last - headerRow,
-      Math.max(sheet.getLastColumn(), width)).clearContent();
+    // Formats as well as content: an urgency tint left on a row that no longer
+    // has a SKU in it reads as a live, urgent line.
+    var stale = sheet.getRange(headerRow + 1, 1, last - headerRow,
+      Math.max(sheet.getLastColumn(), width));
+    stale.clearContent();
+    stale.setBackground(null);
   }
   if (rows.length) {
     sheet.getRange(headerRow + 1, 1, rows.length, width).setValues(rows);
@@ -171,7 +234,9 @@ function writeSummaries(planner, input, plan, cfg) {
     return [x.row.sku, x.row.caseQty, x.dec.cases * x.row.caseQty,
       amazonSkuFor(input, x.row.sku), x.dec.cases, x.dec.ltfComment || ''];
   });
-  replaceBelowHeader(sheetByName(planner, cfg.TABS.SUMMARY_TAC_AWD), H, a, 6);
+  var aSheet = sheetByName(planner, cfg.TABS.SUMMARY_TAC_AWD);
+  replaceBelowHeader(aSheet, H, a, 6);
+  tintByUrgency(aSheet, H, accepted(input.tacToAwd, plan.tacToAwd, cfg), 6, cfg);
 
   // AWD > FBA: SKU | Case qty | Units | CASES | LTF.
   // This one is typed straight into Seller Central, so it stays this narrow.
@@ -179,14 +244,18 @@ function writeSummaries(planner, input, plan, cfg) {
     return [x.row.sku, x.row.caseQty, x.dec.cases * x.row.caseQty,
       x.dec.cases, x.dec.ltfComment || ''];
   });
-  replaceBelowHeader(sheetByName(planner, cfg.TABS.SUMMARY_AWD_FBA), H, f, 5);
+  var fSheet = sheetByName(planner, cfg.TABS.SUMMARY_AWD_FBA);
+  replaceBelowHeader(fSheet, H, f, 5);
+  tintByUrgency(fSheet, H, accepted(input.awdToFba, plan.awdToFba, cfg), 5, cfg);
 
   // Tactical > FBA: name | Case QTY | units | Amazon SKU | Cases
   var t = accepted(input.tacToFba, plan.tacToFba, cfg).map(function (x) {
     return [x.row.sku, x.row.caseQty, x.dec.cases * x.row.caseQty,
       amazonSkuFor(input, x.row.sku), x.dec.cases];
   });
-  replaceBelowHeader(sheetByName(planner, cfg.TABS.SUMMARY_TAC_FBA), H, t, 5);
+  var tSheet = sheetByName(planner, cfg.TABS.SUMMARY_TAC_FBA);
+  replaceBelowHeader(tSheet, H, t, 5);
+  tintByUrgency(tSheet, H, accepted(input.tacToFba, plan.tacToFba, cfg), 5, cfg);
 }
 
 // ----------------------------------------------------------------- CSV tabs

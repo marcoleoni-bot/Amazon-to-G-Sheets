@@ -38,6 +38,15 @@ var CONFIG = {
     MIN_UNITS_ID: '14fW_-GacyK_8JDRE9Z1EomAE87S0rpnsJ9WkxKw7lCE',
 
     /**
+     * Other workbooks this planner imports from. The authoriser also scans the
+     * sheet's own formulas, so this is a safety net for a source that is not
+     * referenced by an IMPORTRANGE the scan can see.
+     */
+    EXTRA_IMPORT_SOURCES: [
+      '1CEMazWrjCanl6Cbld6xpCEl8UOVomNXTbl8-CD7luB0', // Staging_Rates
+    ],
+
+    /**
      * Where the lane input columns are read from.
      *
      *   'planner' — read the planner's own lane tabs, which the template
@@ -368,6 +377,29 @@ var CONFIG = {
     PALLET_FILL: '#efefef',  // light grey
     FLOOR_BREACH_BORDER: '#cc0000',
     HEADER: '#d0e0e3',
+  },
+
+  /**
+   * Urgency, as days of cover at the destination, painted as a ramp.
+   *
+   * Read top to bottom: the first band a SKU falls into wins. Deep red is
+   * about to stock out, green has months of cover. The outputs are sorted on
+   * the same number, so the pick list opens on whatever is closest to running
+   * out rather than on whatever sorts first alphabetically.
+   */
+  URGENCY: {
+    BANDS: [
+      { upTo: 15, colour: '#e06666' },
+      { upTo: 30, colour: '#f6b26b' },
+      { upTo: 45, colour: '#ffd966' },
+      { upTo: 60, colour: '#ffe599' },
+      { upTo: 90, colour: '#d9ead3' },
+      { upTo: 999999, colour: '#b6d7a8' },
+    ],
+    /** Tint the summary tabs as well as the lane tabs. */
+    TINT_SUMMARIES: true,
+    /** Sort every output most-urgent-first. */
+    SORT_BY_URGENCY: true,
   },
 
   /** Month folder names under `Transfer orders`, e.g. `08. August`. */
@@ -1273,15 +1305,24 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
 
   function slot(sku) {
     var k = normSku(sku);
-    if (!bySku[k]) bySku[k] = { awd: [], fba: [], available: 0, minUnits: 0, fbaDoi: null };
+    if (!bySku[k]) {
+      bySku[k] = { awd: [], fba: [], available: 0, minUnits: 0, fbaDoi: null,
+        floorKnown: true };
+    }
     return bySku[k];
+  }
+
+  function noteFloor(s, r) {
+    // null means the floor could not be read, which is not the same as zero.
+    if (r.minUnits === null || r.minUnits === undefined) s.floorKnown = false;
+    else s.minUnits = Math.max(s.minUnits, r.minUnits);
   }
 
   awdRows.forEach(function (r, i) {
     var s = slot(r.sku);
     s.awd.push(i);
     s.available = Math.max(s.available, r.tacAvailableUnits);
-    s.minUnits = Math.max(s.minUnits, r.minUnits);
+    noteFloor(s, r);
     if (s.fbaDoi === null && r.fbaDoi !== undefined && r.fbaDoi !== null) s.fbaDoi = r.fbaDoi;
   });
 
@@ -1289,12 +1330,13 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
     var s = slot(r.sku);
     s.fba.push(i);
     s.available = Math.max(s.available, r.tacAvailableUnits);
-    s.minUnits = Math.max(s.minUnits, r.minUnits);
+    noteFloor(s, r);
     // The FBA lane's own AMZ_DOI is the authoritative figure for the 40 test.
     s.fbaDoi = r.amzDoi;
   });
 
   var headroomUnits = {};
+  var floorUnknown = [];
 
   Object.keys(bySku).forEach(function (k) {
     var s = bySku[k];
@@ -1304,8 +1346,22 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
       return fbaDec[i] && fbaDec[i].floorBreachAllowed && fbaDec[i].cases > 0;
     });
 
-    var floor = breach ? 0 : s.minUnits;
+    // Above the floor is shared. The floor itself is a reserve that only
+    // Tactical > FBA may dip into, and only on the §7.1 exception — that lane
+    // ships SPD, so a small rescue quantity is cheap. Tactical > AWD is
+    // palletised and may never breach the floor to make up a pallet.
+    var floor = s.minUnits;
     var pool = clampMin0(s.available - floor);
+    var reserve = breach ? floor : 0;
+
+    if (!s.floorKnown) {
+      // An unauthorised IMPORTRANGE leaves #REF! where the floor should be.
+      // Drawing on a floor we cannot see is how Tactical gets emptied, so
+      // this SKU does not move until someone can read it.
+      floorUnknown.push(k);
+      pool = 0;
+      reserve = 0;
+    }
 
     // §8: below 40 FBA DOI, FBA is served first; otherwise AWD is.
     var fbaFirst = s.fbaDoi !== null && s.fbaDoi < R.FBA_DOI_CONTENTION;
@@ -1322,11 +1378,17 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
         if (!d || d.cases <= 0) return;
 
         var wanted = d.cases;
-        var affordable = casesIn(pool, r.caseQty);
+        var isFba = lane.rows === fbaRows;
+        var budget = pool + (isFba ? reserve : 0);
+        var affordable = casesIn(budget, r.caseQty);
 
         if (wanted > affordable) {
           d.cases = clampMin0(affordable);
-          if (d.cases === 0 && floor > 0) {
+          if (d.cases === 0 && !s.floorKnown) {
+            d.rule = 'Tactical floor unreadable (#REF!) — not drawing on Tactical';
+            d.notes = [];
+            addFlag(d, 'NEEDS_REVIEW');
+          } else if (d.cases === 0 && floor > 0) {
             d.rule = 'Tactical floor (min ' + fmt(floor) + ' units) reached';
             d.notes = [];
           } else if (laneNo === 1) {
@@ -1339,19 +1401,28 @@ function allocateTactical(awdRows, awdDec, fbaRows, fbaDec, cfg) {
           }
         }
 
-        if (breach && d.cases > 0 && lane.rows === fbaRows) {
+        var take = d.cases * r.caseQty;
+        if (breach && isFba && take > pool) {
           addFlag(d, 'FLOOR_BREACH');
-          addNote(d, 'floor breached: ' + (d.floorBreachNote || 'exception'));
+          addNote(d, 'floor breached by ' + fmt(take - pool) + ' units (SPD): '
+            + (d.floorBreachNote || 'exception'));
         }
 
-        pool = clampMin0(pool - d.cases * r.caseQty);
+        // Spend the shared pool first, then the reserve — which only the FBA
+        // lane was given a budget against.
+        if (take <= pool) {
+          pool -= take;
+        } else {
+          reserve = clampMin0(reserve - (take - pool));
+          pool = 0;
+        }
       });
     });
 
     headroomUnits[k] = pool;
   });
 
-  return { headroomUnits: headroomUnits };
+  return { headroomUnits: headroomUnits, floorUnknown: floorUnknown };
 }
 
 /**
@@ -1414,10 +1485,15 @@ function planUsTransferOrders(input, cfg) {
     awdToFba: awdFbaDec,
     tacToFba: tacFbaDec,
     pallet: pallet,
+    floorUnknown: alloc.floorUnknown,
     verdicts: {
-      tacToAwd: laneVerdict('Tactical → AWD', input.tacToAwd, tacAwdDec, tacAwdVerdict),
+      tacToAwd: withFloorWarning(
+        laneVerdict('Tactical → AWD', input.tacToAwd, tacAwdDec, tacAwdVerdict),
+        alloc.floorUnknown),
       awdToFba: laneVerdict('AWD → FBA', input.awdToFba, awdFbaDec, null),
-      tacToFba: laneVerdict('Tactical → FBA', input.tacToFba, tacFbaDec, null),
+      tacToFba: withFloorWarning(
+        laneVerdict('Tactical → FBA', input.tacToFba, tacFbaDec, null),
+        alloc.floorUnknown),
     },
     totals: {
       tacToAwdCases: sumCases(tacAwdDec),
@@ -1462,6 +1538,21 @@ function laneVerdict(label, rows, decisions, pre) {
     why: skus + ' SKU' + (skus === 1 ? '' : 's') + ', ' + cases + ' cases'
       + (pre && pre.why ? ' — ' + pre.why : ''),
   };
+}
+
+/**
+ * A floor nobody could read is not a floor of zero, and a run that drew on one
+ * is not a run you want to discover afterwards. Say it on the verdict.
+ */
+function withFloorWarning(verdict, floorUnknown) {
+  if (!floorUnknown || !floorUnknown.length) return verdict;
+  verdict.floorUnknown = floorUnknown.length;
+  verdict.why = '⚠ Tactical floor unreadable for ' + floorUnknown.length
+    + ' SKU' + (floorUnknown.length === 1 ? '' : 's') + ' ('
+    + floorUnknown.slice(0, 3).join(', ')
+    + (floorUnknown.length > 3 ? '…' : '') + ') — those are held. '
+    + 'Run Transfer Orders → Authorise data sources, then run again. ' + verdict.why;
+  return verdict;
 }
 
 function sumCases(dec) {
@@ -1728,9 +1819,23 @@ function readPlanningInput(planner, cfg) {
     return p ? p.caseQty : 0;
   }
 
+  /**
+   * The Tactical floor, or null when it genuinely cannot be read.
+   *
+   * Never zero on failure. An unauthorised IMPORTRANGE leaves #REF! in column
+   * B, and reading that as "no floor" is the one direction that empties
+   * Tactical — it is what let a real run draw five SKUs down to zero units
+   * against floors of 100. Unknown has to stay unknown so the lane can refuse
+   * to draw rather than quietly overdraw.
+   */
+  var floorUnknown = [];
   function floorFor(sku, cellValue) {
     var k = normSku(sku);
     if (Object.prototype.hasOwnProperty.call(minUnits.bySku, k)) return minUnits.bySku[k];
+    if (isSheetError(cellValue)) {
+      floorUnknown.push(sku);
+      return null;
+    }
     return num(cellValue);
   }
 
@@ -1832,6 +1937,7 @@ function readPlanningInput(planner, cfg) {
     },
     meta: {
       minUnitsSource: minUnits.source,
+      floorUnknown: floorUnknown,
       laneSource: cfg.SOURCES.LANES_FROM === 'ims' ? 'IMS' : 'planner',
       criticalCount: Object.keys(critical).length,
       ltfCount: Object.keys(ltfIndex).length,
@@ -1860,6 +1966,10 @@ function writePlan(planner, input, plan, cfg, ctx) {
     cfg.COLS.AWD_TO_FBA, cfg, 'Reason');
   writeLane(input.sheets.tacToFba, input.tacToFba, plan.tacToFba,
     cfg.COLS.TAC_TO_FBA, cfg, 'Reason');
+
+  tintLaneUrgency(input.sheets.tacToAwd, input.tacToAwd, cfg.COLS.TAC_TO_AWD.AWD_DOI, cfg);
+  tintLaneUrgency(input.sheets.awdToFba, input.awdToFba, cfg.COLS.AWD_TO_FBA.AMZ_DOI, cfg);
+  tintLaneUrgency(input.sheets.tacToFba, input.tacToFba, cfg.COLS.TAC_TO_FBA.AMZ_DOI, cfg);
 
   if (cfg.OUTPUT.WRITE_RECOMPUTED_Y) {
     writeAvailableOnlyDoi(input.sheets.awdToFba, input.awdToFba, cfg);
@@ -1934,6 +2044,21 @@ function writeLane(sheet, rows, decisions, C, cfg, reasonHeader) {
   });
 }
 
+/**
+ * Ramp the destination-DOI column red to green, so scanning the lane shows
+ * what is close to running out before you read a single number.
+ */
+function tintLaneUrgency(sheet, rows, doiCol, cfg) {
+  if (!sheet || !rows.length) return;
+  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  var span = rows[rows.length - 1].rowIndex - first + 1;
+  var fills = blankColumn(span, null);
+  rows.forEach(function (r) {
+    fills[r.rowIndex - first][0] = urgencyColour(urgencyOf(r), cfg);
+  });
+  sheet.getRange(first, doiCol + 1, span, 1).setBackgrounds(fills);
+}
+
 /** §4 — column Y recomputed on order_plan_rate, so the sheet shows what the rule used. */
 function writeAvailableOnlyDoi(sheet, rows, cfg) {
   if (!sheet || !rows.length) return;
@@ -1976,16 +2101,44 @@ function colLetter(zeroBased) {
 
 // ----------------------------------------------------------------- summaries
 
-/** Accepted rows for a lane: cases > 0, sorted by SKU so it reads down cleanly. */
+/**
+ * Days of cover at the destination — the number that decides how urgent a row
+ * is. FBA for the two lanes that end there, AWD for Tactical > AWD.
+ */
+function urgencyOf(row) {
+  if (row.amzDoi !== undefined && row.amzDoi !== null) return row.amzDoi;
+  if (row.awdDoi !== undefined && row.awdDoi !== null) return row.awdDoi;
+  return 999999;
+}
+
+/** The first band the cover falls into. */
+function urgencyColour(doi, cfg) {
+  var bands = cfg.URGENCY.BANDS;
+  for (var i = 0; i < bands.length; i++) {
+    if (doi <= bands[i].upTo) return bands[i].colour;
+  }
+  return bands[bands.length - 1].colour;
+}
+
+/**
+ * Accepted rows for a lane: cases > 0, most urgent first.
+ *
+ * Sorted on days of cover rather than SKU, because the question when reading
+ * down a pick list is "what runs out first", and alphabetical order answers a
+ * question nobody asked.
+ */
 function accepted(rows, decisions, cfg) {
   var out = [];
   rows.forEach(function (r, i) {
     var d = decisions[i];
     if (!d || d.cases <= 0) return;
     if (!cfg.OUTPUT.LTF_IN_SUMMARIES && d.flags.indexOf('LTF_FLAG') !== -1) return;
-    out.push({ row: r, dec: d });
+    out.push({ row: r, dec: d, urgency: urgencyOf(r) });
   });
   out.sort(function (a, b) {
+    if (cfg.URGENCY.SORT_BY_URGENCY && a.urgency !== b.urgency) {
+      return a.urgency - b.urgency;
+    }
     return a.row.sku < b.row.sku ? -1 : (a.row.sku > b.row.sku ? 1 : 0);
   });
   return out;
@@ -1996,13 +2149,29 @@ function amazonSkuFor(input, sku) {
   return p ? p.amazonSku : '';
 }
 
+/** Paint each written summary row by how close it is to running out. */
+function tintByUrgency(sheet, headerRow, picks, width, cfg) {
+  if (!sheet || !picks.length || !cfg.URGENCY.TINT_SUMMARIES) return;
+  var fills = picks.map(function (p) {
+    var c = urgencyColour(p.urgency, cfg);
+    var row = [];
+    for (var i = 0; i < width; i++) row.push(c);
+    return row;
+  });
+  sheet.getRange(headerRow + 1, 1, picks.length, width).setBackgrounds(fills);
+}
+
 /** Replace everything below the header row, so nothing survives from last week. */
 function replaceBelowHeader(sheet, headerRow, rows, width) {
   if (!sheet) return;
   var last = sheet.getLastRow();
   if (last > headerRow) {
-    sheet.getRange(headerRow + 1, 1, last - headerRow,
-      Math.max(sheet.getLastColumn(), width)).clearContent();
+    // Formats as well as content: an urgency tint left on a row that no longer
+    // has a SKU in it reads as a live, urgent line.
+    var stale = sheet.getRange(headerRow + 1, 1, last - headerRow,
+      Math.max(sheet.getLastColumn(), width));
+    stale.clearContent();
+    stale.setBackground(null);
   }
   if (rows.length) {
     sheet.getRange(headerRow + 1, 1, rows.length, width).setValues(rows);
@@ -2017,7 +2186,9 @@ function writeSummaries(planner, input, plan, cfg) {
     return [x.row.sku, x.row.caseQty, x.dec.cases * x.row.caseQty,
       amazonSkuFor(input, x.row.sku), x.dec.cases, x.dec.ltfComment || ''];
   });
-  replaceBelowHeader(sheetByName(planner, cfg.TABS.SUMMARY_TAC_AWD), H, a, 6);
+  var aSheet = sheetByName(planner, cfg.TABS.SUMMARY_TAC_AWD);
+  replaceBelowHeader(aSheet, H, a, 6);
+  tintByUrgency(aSheet, H, accepted(input.tacToAwd, plan.tacToAwd, cfg), 6, cfg);
 
   // AWD > FBA: SKU | Case qty | Units | CASES | LTF.
   // This one is typed straight into Seller Central, so it stays this narrow.
@@ -2025,14 +2196,18 @@ function writeSummaries(planner, input, plan, cfg) {
     return [x.row.sku, x.row.caseQty, x.dec.cases * x.row.caseQty,
       x.dec.cases, x.dec.ltfComment || ''];
   });
-  replaceBelowHeader(sheetByName(planner, cfg.TABS.SUMMARY_AWD_FBA), H, f, 5);
+  var fSheet = sheetByName(planner, cfg.TABS.SUMMARY_AWD_FBA);
+  replaceBelowHeader(fSheet, H, f, 5);
+  tintByUrgency(fSheet, H, accepted(input.awdToFba, plan.awdToFba, cfg), 5, cfg);
 
   // Tactical > FBA: name | Case QTY | units | Amazon SKU | Cases
   var t = accepted(input.tacToFba, plan.tacToFba, cfg).map(function (x) {
     return [x.row.sku, x.row.caseQty, x.dec.cases * x.row.caseQty,
       amazonSkuFor(input, x.row.sku), x.dec.cases];
   });
-  replaceBelowHeader(sheetByName(planner, cfg.TABS.SUMMARY_TAC_FBA), H, t, 5);
+  var tSheet = sheetByName(planner, cfg.TABS.SUMMARY_TAC_FBA);
+  replaceBelowHeader(tSheet, H, t, 5);
+  tintByUrgency(tSheet, H, accepted(input.tacToFba, plan.tacToFba, cfg), 5, cfg);
 }
 
 // ----------------------------------------------------------------- CSV tabs
@@ -2406,6 +2581,120 @@ function writeBacktestReport(ss, report, cfg, title) {
 }
 
 // ========================================================================
+// Authorise.gs
+// ========================================================================
+
+/**
+ * Pre-approving the IMPORTRANGE links this planner depends on.
+ *
+ * A fresh copy of the template has to be told, once per source workbook, that
+ * it may pull from it — otherwise every IMPORTRANGE returns #REF! until someone
+ * clicks "Allow access" in the cell. That click is easy to miss, and missing it
+ * is not harmless: the Tactical floor arrives as #REF!, and a floor that cannot
+ * be read used to read as no floor at all.
+ *
+ * Google exposes no supported API for this. The endpoint below is the one the
+ * Sheets front-end itself calls when you click Allow, driven with the script's
+ * own OAuth token. It is undocumented, so it is written to fail softly: a
+ * refusal here is reported, never thrown, and the run still refuses to draw on
+ * a floor it cannot see.
+ */
+
+/**
+ * Grant this spreadsheet permission to import from every known source.
+ * Returns [{ id, ok, status }] — one entry per donor, in the order tried.
+ */
+function authoriseDataSources(planner, cfg) {
+  var ss = planner || SpreadsheetApp.getActiveSpreadsheet();
+  var conf = cfg || config();
+  var donors = donorIds(ss, conf);
+  var token = ScriptApp.getOAuthToken();
+  var destId = ss.getId();
+
+  return donors.map(function (donorId) {
+    var url = 'https://docs.google.com/spreadsheets/d/' + destId
+      + '/externaldata/addimportrangepermissions?donorDocId=' + donorId;
+    try {
+      var res = UrlFetchApp.fetch(url, {
+        method: 'post',
+        headers: { Authorization: 'Bearer ' + token },
+        muteHttpExceptions: true,
+      });
+      var code = res.getResponseCode();
+      return { id: donorId, ok: code >= 200 && code < 300, status: 'HTTP ' + code };
+    } catch (e) {
+      return { id: donorId, ok: false, status: e.message };
+    }
+  });
+}
+
+/**
+ * Every workbook this planner imports from: the ones named in Config, plus any
+ * other ID found inside an IMPORTRANGE on the sheet.
+ *
+ * Scanning the formulas matters more than the configured list — someone adds an
+ * IMPORTRANGE to a tab long before anyone thinks to add its ID here, and the
+ * symptom of missing one is a silent #REF! rather than an error.
+ */
+function donorIds(ss, cfg) {
+  var seen = {};
+  var out = [];
+  function add(id) {
+    if (!id || id === ss.getId() || seen[id]) return;
+    seen[id] = true;
+    out.push(id);
+  }
+
+  [cfg.SOURCES.IMS_ID, cfg.SOURCES.MIN_UNITS_ID].forEach(add);
+  (cfg.SOURCES.EXTRA_IMPORT_SOURCES || []).forEach(add);
+
+  ss.getSheets().forEach(function (sh) {
+    if (sh.getLastRow() < 1 || sh.getLastColumn() < 1) return;
+    var formulas;
+    try {
+      formulas = sh.getRange(1, 1, Math.min(sh.getLastRow(), 200),
+        sh.getLastColumn()).getFormulas();
+    } catch (e) {
+      return;
+    }
+    formulas.forEach(function (row) {
+      row.forEach(function (f) {
+        if (!f || f.indexOf('IMPORTRANGE') === -1) return;
+        var m = f.match(/[-\w]{25,}/g);
+        if (m) m.forEach(add);
+      });
+    });
+  });
+
+  return out;
+}
+
+/** Menu entry: authorise, then say what happened. */
+function authoriseDataSourcesMenu() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var results = authoriseDataSources(ss, config());
+  var ui = SpreadsheetApp.getUi();
+
+  if (!results.length) {
+    ui.alert('Nothing to authorise', 'No IMPORTRANGE sources found in this file.',
+      ui.ButtonSet.OK);
+    return results;
+  }
+
+  var lines = results.map(function (r) {
+    return (r.ok ? '✓ ' : '✗ ') + r.id + '  (' + r.status + ')';
+  });
+  var failed = results.filter(function (r) { return !r.ok; }).length;
+  lines.unshift(results.length - failed + ' of ' + results.length + ' authorised.', '');
+  if (failed) {
+    lines.push('', 'For any that failed, open the cell showing #REF! and click',
+      '"Allow access" once. That grant is per source workbook and sticks.');
+  }
+  ui.alert('Data sources', lines.join('\n'), ui.ButtonSet.OK);
+  return results;
+}
+
+// ========================================================================
 // Menu.gs
 // ========================================================================
 
@@ -2425,6 +2714,7 @@ function onOpen() {
     .addItem('Build US plan in this file', 'buildPlanHere')
     .addSeparator()
     .addItem('Dry run (report only, writes nothing)', 'dryRun')
+    .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
     .addItem('Back-test this file against its own numbers', 'backtestThisFile')
     .addItem('Back-test another planner…', 'backtestPrompt')
     .addSeparator()
@@ -2480,6 +2770,9 @@ function dryRun() {
 
 /** Read, decide, write. The one path both menu items share. */
 function runPlan(planner, cfg, ctx) {
+  // Clear the IMPORTRANGE grants before reading, so a fresh copy does not plan
+  // against a sheet full of #REF!.
+  authoriseDataSources(planner, cfg);
   var input = readPlanningInput(planner, cfg);
   var plan = planUsTransferOrders(input, cfg);
   writePlan(planner, input, plan, cfg, ctx);

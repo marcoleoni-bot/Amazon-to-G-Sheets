@@ -14,6 +14,7 @@ function onOpen() {
     .addItem('Build US plan in this file', 'buildPlanHere')
     .addSeparator()
     .addItem('Dry run (report only, writes nothing)', 'dryRun')
+    .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
     .addItem('Back-test this file against its own numbers', 'backtestThisFile')
     .addItem('Back-test another planner…', 'backtestPrompt')
     .addSeparator()
@@ -69,6 +70,9 @@ function dryRun() {
 
 /** Read, decide, write. The one path both menu items share. */
 function runPlan(planner, cfg, ctx) {
+  // Clear the IMPORTRANGE grants before reading, so a fresh copy does not plan
+  // against a sheet full of #REF!.
+  authoriseDataSources(planner, cfg);
   var input = readPlanningInput(planner, cfg);
   var plan = planUsTransferOrders(input, cfg);
   writePlan(planner, input, plan, cfg, ctx);
