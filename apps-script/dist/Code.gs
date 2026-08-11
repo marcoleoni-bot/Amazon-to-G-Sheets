@@ -274,8 +274,36 @@ var CONFIG = {
 
     /** Tactical>AWD ships on pallets. */
     PALLET_MIN_CASES: 25,
-    PALLET_FILL_MAX_AWD_DOI: 100,     // §12, still to be confirmed by Marco
-    PALLET_FILL_MAX_CASES_PER_SKU: 2, // §12, still to be confirmed by Marco
+    PALLET_FILL_MAX_AWD_DOI: 100,
+    PALLET_FILL_MAX_CASES_PER_SKU: 2,
+
+    /**
+     * Whether a Tactical>AWD run is worth raising at all.
+     *
+     * The pallet minimum is a constraint on a shipment, not a reason to make
+     * one. Read the other way round it produces exactly the wrong answer: five
+     * cases of genuine need, padded with twenty cases of SKUs that did not need
+     * anything, purely to fill the pallet. That is more work, more freight and
+     * more stock sitting at AWD than doing nothing would have been.
+     *
+     * So the lane asks first whether anything is actually running thin. A SKU
+     * on 40 days of AWD cover with FBA healthy behind it is not urgent — it can
+     * wait for a run where something is. Only once a run is justified does the
+     * pallet minimum apply, and the fill tops it up, because by then the pallet
+     * is being paid for regardless.
+     *
+     * Across six back-tested runs Tactical shipped once. Filling on demand
+     * alone proposed a load every single run.
+     *
+     * Both conditions must hold. AWD exists to feed FBA, so an empty shelf at
+     * AWD is only a problem when FBA cannot cover the gap — 101-2102 carries no
+     * AWD stock at all, which reads as 0 days of cover, while sitting on 599
+     * days at FBA and selling a sixth of a unit a day. Treating "0 DOI at AWD"
+     * as an emergency on its own turns the quietest SKU in the catalogue into
+     * the loudest, and justifies a pallet every single week.
+     */
+    TAC_TO_AWD_URGENCY_AWD_DOI: 30,   // AWD cover below this is thin
+    TAC_TO_AWD_HEALTHY_FBA_DOI: 60,   // ...and only matters if FBA is this thin
 
     /** Contention: below this FBA DOI, Tactical serves FBA before AWD (§8). */
     FBA_DOI_CONTENTION: 40,
@@ -880,6 +908,98 @@ function isDiscontinued(r) {
 }
 
 /**
+ * Is this run worth raising at all?
+ *
+ * Asked before the pallet minimum, and answered on urgency rather than volume:
+ * the pallet is a constraint on a shipment, not a reason to make one. A SKU
+ * with 40 days of AWD cover and healthy FBA behind it can wait for a run where
+ * something is genuinely thin.
+ *
+ * Returns { urgent, reasons, thinnest } — `reasons` names the SKUs that
+ * justify the run, so the verdict can say why rather than just yes or no.
+ */
+function assessUrgency(rows, decisions, cfg) {
+  var R = cfg.RULES;
+  var urgent = [];
+  var thinnest = null;
+
+  rows.forEach(function (r, i) {
+    if (isDiscontinued(r) || !(r.rate > 0)) return;
+    if (!decisions[i] || decisions[i].cases <= 0) return;
+
+    if (thinnest === null || r.awdDoi < thinnest.awdDoi) thinnest = r;
+
+    // Both, not either. AWD is a buffer in front of FBA, so an empty buffer
+    // only matters when FBA is close enough to needing it.
+    var thin = r.awdDoi < R.TAC_TO_AWD_URGENCY_AWD_DOI;
+    var fbaCanHold = r.fbaDoi !== null && r.fbaDoi !== undefined
+      && r.fbaDoi >= R.TAC_TO_AWD_HEALTHY_FBA_DOI;
+
+    if (thin && !fbaCanHold) {
+      urgent.push({
+        sku: r.sku,
+        awdDoi: r.awdDoi,
+        fbaDoi: r.fbaDoi,
+        cases: decisions[i].cases,
+      });
+    }
+  });
+
+  urgent.sort(function (a, b) { return a.awdDoi - b.awdDoi; });
+  return { urgent: urgent, thinnest: thinnest };
+}
+
+/**
+ * The lane's verdict: raise this transfer order, or hold it for a later run.
+ *
+ * Holding zeroes the lane rather than leaving numbers nobody intends to ship,
+ * and every row that wanted stock says why it is being held instead.
+ */
+function decideTacToAwdRun(rows, decisions, cfg) {
+  var R = cfg.RULES;
+  var demand = decisions.reduce(function (s, d) { return s + (d.cases > 0 ? d.cases : 0); }, 0);
+  var assessment = assessUrgency(rows, decisions, cfg);
+
+  if (demand === 0) {
+    return {
+      raise: false, demandCases: 0, urgent: [],
+      why: 'nothing below the ' + dssFor(cfg, 'TAC_TO_AWD') + ' DOI target at AWD',
+    };
+  }
+
+  if (!assessment.urgent.length) {
+    var t = assessment.thinnest;
+    var why = 'nothing urgent — '
+      + (t ? 'thinnest is ' + t.sku + ' at ' + fmt(t.awdDoi) + ' DOI at AWD'
+        + (t.fbaDoi ? ', FBA on ' + fmt(t.fbaDoi) : '') : 'no SKU below '
+        + R.TAC_TO_AWD_URGENCY_AWD_DOI + ' DOI')
+      + '. ' + demand + ' cases of demand would need '
+      + clampMin0(R.PALLET_MIN_CASES - demand) + ' cases of filler to make a pallet';
+
+    rows.forEach(function (r, i) {
+      if (decisions[i].cases <= 0) return;
+      decisions[i] = decision(0, 'held for a later run', {
+        pass: 'NONE',
+        notes: ['would have sent ' + decisions[i].cases + ' cases, AWD on '
+          + fmt(r.awdDoi) + ' DOI — not urgent'],
+      });
+    });
+
+    return { raise: false, demandCases: demand, urgent: [], why: why, held: true };
+  }
+
+  return {
+    raise: true,
+    demandCases: demand,
+    urgent: assessment.urgent,
+    why: assessment.urgent.length + ' SKU' + (assessment.urgent.length === 1 ? '' : 's')
+      + ' running thin at AWD — ' + assessment.urgent.slice(0, 3).map(function (u) {
+        return u.sku + ' (' + fmt(u.awdDoi) + ' DOI)';
+      }).join(', ') + (assessment.urgent.length > 3 ? ' and others' : ''),
+  };
+}
+
+/**
  * §6.1 — Tactical>AWD ships palletised, so a run that goes at all must carry
  * at least 25 cases.
  *
@@ -1273,19 +1393,32 @@ function planUsTransferOrders(input, cfg) {
   // 3 — Tactical > AWD demand
   var tacAwdDec = planTacToAwd(input.tacToAwd, cfg, ltf);
 
+  // 3b — is this run worth raising? Deciding before contention means a held
+  // run gives its Tactical stock back to the FBA lane instead of reserving it.
+  var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
+
   // 4 — one floor, two lanes
   var alloc = allocateTactical(input.tacToAwd, tacAwdDec,
     input.tacToFba, tacFbaDec, cfg);
 
-  // 5 — pallet minimum
-  var pallet = applyPalletFill(input.tacToAwd, tacAwdDec, cfg,
-    alloc.headroomUnits, ltf);
+  // 5 — the pallet minimum applies to a run that is going, and only then
+  var pallet = tacAwdVerdict.raise
+    ? applyPalletFill(input.tacToAwd, tacAwdDec, cfg, alloc.headroomUnits, ltf)
+    : {
+      demandCases: tacAwdVerdict.demandCases, target: cfg.RULES.PALLET_MIN_CASES,
+      filledCases: 0, shortfall: 0, skipped: true,
+    };
 
   return {
     tacToAwd: tacAwdDec,
     awdToFba: awdFbaDec,
     tacToFba: tacFbaDec,
     pallet: pallet,
+    verdicts: {
+      tacToAwd: laneVerdict('Tactical → AWD', input.tacToAwd, tacAwdDec, tacAwdVerdict),
+      awdToFba: laneVerdict('AWD → FBA', input.awdToFba, awdFbaDec, null),
+      tacToFba: laneVerdict('Tactical → FBA', input.tacToFba, tacFbaDec, null),
+    },
     totals: {
       tacToAwdCases: sumCases(tacAwdDec),
       awdToFbaCases: sumCases(awdFbaDec),
@@ -1296,6 +1429,38 @@ function planUsTransferOrders(input, cfg) {
         + countFlag(tacAwdDec, 'NEEDS_REVIEW') + countFlag(tacFbaDec, 'NEEDS_REVIEW'),
       floorBreaches: countFlag(tacFbaDec, 'FLOOR_BREACH'),
     },
+  };
+}
+
+/**
+ * Raise this transfer order, or not — and why, in one line.
+ *
+ * The answer to "should I do this TO today" should not require reading 491
+ * rows to work out, so each lane states it plainly. `pre` carries a verdict
+ * already reached by the lane's own rules (Tactical > AWD decides on urgency
+ * before volume); the others are simply whether anything survived.
+ */
+function laneVerdict(label, rows, decisions, pre) {
+  var cases = sumCases(decisions);
+  var skus = decisions.reduce(function (s, d) {
+    return s + (d && d.cases > 0 ? 1 : 0);
+  }, 0);
+
+  if (pre && !pre.raise) {
+    return { lane: label, raise: false, cases: 0, skus: 0, why: pre.why };
+  }
+  if (cases === 0) {
+    return {
+      lane: label, raise: false, cases: 0, skus: 0,
+      why: label === 'Tactical → FBA'
+        ? 'AWD is covering every shortfall — nothing residual to send'
+        : 'nothing below target',
+    };
+  }
+  return {
+    lane: label, raise: true, cases: cases, skus: skus,
+    why: skus + ' SKU' + (skus === 1 ? '' : 's') + ', ' + cases + ' cases'
+      + (pre && pre.why ? ' — ' + pre.why : ''),
   };
 }
 
@@ -1930,8 +2095,18 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
 
   var c = ctx || {};
   var pallet = plan.pallet;
+  var v = plan.verdicts;
+
+  // The verdict goes first. "Do I raise this TO today, and why" is the whole
+  // question, and it should not need 491 rows of reading to answer.
   var lines = [
     ['US transfer order plan', ''],
+    ['', ''],
+    ['RAISE THIS ORDER?', ''],
+    [v.tacToAwd.lane, (v.tacToAwd.raise ? 'YES — ' : 'NO — ') + v.tacToAwd.why],
+    [v.awdToFba.lane, (v.awdToFba.raise ? 'YES — ' : 'NO — ') + v.awdToFba.why],
+    [v.tacToFba.lane, (v.tacToFba.raise ? 'YES — ' : 'NO — ') + v.tacToFba.why],
+    ['', ''],
     ['Built', Utilities.formatDate(new Date(), cfg.TIMEZONE, 'yyyy-MM-dd HH:mm z')],
     ['Snapshot', c.snapshot || 'live'],
     ['Lane values from', input.meta.laneSource],
@@ -1969,7 +2144,18 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
   sh.getRange(1, 1, lines.length, 2).setValues(lines);
   sh.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground(cfg.COLOURS.HEADER);
   sh.setColumnWidth(1, 260);
-  sh.setColumnWidth(2, 460);
+  sh.setColumnWidth(2, 560);
+
+  // Colour the three verdicts so a held lane cannot be mistaken for a live one.
+  var verdictAt = labelRow(lines, 'RAISE THIS ORDER?');
+  if (verdictAt) {
+    sh.getRange(verdictAt, 1, 1, 2).setFontWeight('bold')
+      .setBackground(cfg.COLOURS.HEADER);
+    [v.tacToAwd, v.awdToFba, v.tacToFba].forEach(function (lane, i) {
+      sh.getRange(verdictAt + 1 + i, 1, 1, 2)
+        .setBackground(lane.raise ? cfg.COLOURS.PASS_2 : cfg.COLOURS.PALLET_FILL);
+    });
+  }
 
   // §6.1: an under-full pallet is surfaced here rather than shipped quietly.
   if (pallet.shortfall > 0) {
@@ -2278,10 +2464,7 @@ function dryRun() {
   var input = readPlanningInput(ss, cfg);
   var plan = planUsTransferOrders(input, cfg);
 
-  var lines = [
-    'Tactical > AWD:  ' + plan.totals.tacToAwdCases + ' cases',
-    'AWD > FBA:       ' + plan.totals.awdToFbaCases + ' cases',
-    'Tactical > FBA:  ' + plan.totals.tacToFbaCases + ' cases',
+  var lines = verdictLines(plan).concat([
     '',
     'Pallet: ' + palletStatus(plan.pallet),
     'Needs review: ' + plan.totals.needsReview,
@@ -2289,7 +2472,7 @@ function dryRun() {
     'Floor breaches: ' + plan.totals.floorBreaches,
     '',
     'Tactical floor from: ' + input.meta.minUnitsSource,
-  ];
+  ]);
   SpreadsheetApp.getUi().alert('Dry run — nothing written', lines.join('\n'),
     SpreadsheetApp.getUi().ButtonSet.OK);
   return plan;
@@ -2304,14 +2487,27 @@ function runPlan(planner, cfg, ctx) {
   return { planner: planner, input: input, plan: plan };
 }
 
+/** The three verdicts, as the first thing any dialog says. */
+function verdictLines(plan) {
+  var v = plan.verdicts;
+  return [
+    'RAISE THIS ORDER?',
+    '',
+    (v.tacToAwd.raise ? '\u2713 ' : '\u2013 ') + 'Tactical > AWD:  '
+      + (v.tacToAwd.raise ? 'YES' : 'NO') + ' \u2014 ' + v.tacToAwd.why,
+    (v.awdToFba.raise ? '\u2713 ' : '\u2013 ') + 'AWD > FBA:       '
+      + (v.awdToFba.raise ? 'YES' : 'NO') + ' \u2014 ' + v.awdToFba.why,
+    (v.tacToFba.raise ? '\u2713 ' : '\u2013 ') + 'Tactical > FBA:  '
+      + (v.tacToFba.raise ? 'YES' : 'NO') + ' \u2014 ' + v.tacToFba.why,
+  ];
+}
+
 function report_(result, ss) {
   var p = result.plan;
   var ui = SpreadsheetApp.getUi();
   ui.alert('Plan built',
     ss.getName() + '\n\n'
-    + 'Tactical > AWD:  ' + p.totals.tacToAwdCases + ' cases\n'
-    + 'AWD > FBA:       ' + p.totals.awdToFbaCases + ' cases\n'
-    + 'Tactical > FBA:  ' + p.totals.tacToFbaCases + ' cases\n\n'
+    + verdictLines(p).join('\n') + '\n\n'
     + 'Pallet: ' + palletStatus(p.pallet) + '\n'
     + 'Needs review: ' + p.totals.needsReview + '\n'
     + 'LTF flagged: ' + p.totals.ltfHeld + '\n\n'

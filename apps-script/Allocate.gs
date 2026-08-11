@@ -142,19 +142,32 @@ function planUsTransferOrders(input, cfg) {
   // 3 — Tactical > AWD demand
   var tacAwdDec = planTacToAwd(input.tacToAwd, cfg, ltf);
 
+  // 3b — is this run worth raising? Deciding before contention means a held
+  // run gives its Tactical stock back to the FBA lane instead of reserving it.
+  var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
+
   // 4 — one floor, two lanes
   var alloc = allocateTactical(input.tacToAwd, tacAwdDec,
     input.tacToFba, tacFbaDec, cfg);
 
-  // 5 — pallet minimum
-  var pallet = applyPalletFill(input.tacToAwd, tacAwdDec, cfg,
-    alloc.headroomUnits, ltf);
+  // 5 — the pallet minimum applies to a run that is going, and only then
+  var pallet = tacAwdVerdict.raise
+    ? applyPalletFill(input.tacToAwd, tacAwdDec, cfg, alloc.headroomUnits, ltf)
+    : {
+      demandCases: tacAwdVerdict.demandCases, target: cfg.RULES.PALLET_MIN_CASES,
+      filledCases: 0, shortfall: 0, skipped: true,
+    };
 
   return {
     tacToAwd: tacAwdDec,
     awdToFba: awdFbaDec,
     tacToFba: tacFbaDec,
     pallet: pallet,
+    verdicts: {
+      tacToAwd: laneVerdict('Tactical → AWD', input.tacToAwd, tacAwdDec, tacAwdVerdict),
+      awdToFba: laneVerdict('AWD → FBA', input.awdToFba, awdFbaDec, null),
+      tacToFba: laneVerdict('Tactical → FBA', input.tacToFba, tacFbaDec, null),
+    },
     totals: {
       tacToAwdCases: sumCases(tacAwdDec),
       awdToFbaCases: sumCases(awdFbaDec),
@@ -165,6 +178,38 @@ function planUsTransferOrders(input, cfg) {
         + countFlag(tacAwdDec, 'NEEDS_REVIEW') + countFlag(tacFbaDec, 'NEEDS_REVIEW'),
       floorBreaches: countFlag(tacFbaDec, 'FLOOR_BREACH'),
     },
+  };
+}
+
+/**
+ * Raise this transfer order, or not — and why, in one line.
+ *
+ * The answer to "should I do this TO today" should not require reading 491
+ * rows to work out, so each lane states it plainly. `pre` carries a verdict
+ * already reached by the lane's own rules (Tactical > AWD decides on urgency
+ * before volume); the others are simply whether anything survived.
+ */
+function laneVerdict(label, rows, decisions, pre) {
+  var cases = sumCases(decisions);
+  var skus = decisions.reduce(function (s, d) {
+    return s + (d && d.cases > 0 ? 1 : 0);
+  }, 0);
+
+  if (pre && !pre.raise) {
+    return { lane: label, raise: false, cases: 0, skus: 0, why: pre.why };
+  }
+  if (cases === 0) {
+    return {
+      lane: label, raise: false, cases: 0, skus: 0,
+      why: label === 'Tactical → FBA'
+        ? 'AWD is covering every shortfall — nothing residual to send'
+        : 'nothing below target',
+    };
+  }
+  return {
+    lane: label, raise: true, cases: cases, skus: skus,
+    why: skus + ' SKU' + (skus === 1 ? '' : 's') + ', ' + cases + ' cases'
+      + (pre && pre.why ? ' — ' + pre.why : ''),
   };
 }
 

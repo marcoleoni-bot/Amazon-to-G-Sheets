@@ -261,8 +261,36 @@ var CONFIG = {
 
     /** Tactical>AWD ships on pallets. */
     PALLET_MIN_CASES: 25,
-    PALLET_FILL_MAX_AWD_DOI: 100,     // §12, still to be confirmed by Marco
-    PALLET_FILL_MAX_CASES_PER_SKU: 2, // §12, still to be confirmed by Marco
+    PALLET_FILL_MAX_AWD_DOI: 100,
+    PALLET_FILL_MAX_CASES_PER_SKU: 2,
+
+    /**
+     * Whether a Tactical>AWD run is worth raising at all.
+     *
+     * The pallet minimum is a constraint on a shipment, not a reason to make
+     * one. Read the other way round it produces exactly the wrong answer: five
+     * cases of genuine need, padded with twenty cases of SKUs that did not need
+     * anything, purely to fill the pallet. That is more work, more freight and
+     * more stock sitting at AWD than doing nothing would have been.
+     *
+     * So the lane asks first whether anything is actually running thin. A SKU
+     * on 40 days of AWD cover with FBA healthy behind it is not urgent — it can
+     * wait for a run where something is. Only once a run is justified does the
+     * pallet minimum apply, and the fill tops it up, because by then the pallet
+     * is being paid for regardless.
+     *
+     * Across six back-tested runs Tactical shipped once. Filling on demand
+     * alone proposed a load every single run.
+     *
+     * Both conditions must hold. AWD exists to feed FBA, so an empty shelf at
+     * AWD is only a problem when FBA cannot cover the gap — 101-2102 carries no
+     * AWD stock at all, which reads as 0 days of cover, while sitting on 599
+     * days at FBA and selling a sixth of a unit a day. Treating "0 DOI at AWD"
+     * as an emergency on its own turns the quietest SKU in the catalogue into
+     * the loudest, and justifies a pallet every single week.
+     */
+    TAC_TO_AWD_URGENCY_AWD_DOI: 30,   // AWD cover below this is thin
+    TAC_TO_AWD_HEALTHY_FBA_DOI: 60,   // ...and only matters if FBA is this thin
 
     /** Contention: below this FBA DOI, Tactical serves FBA before AWD (§8). */
     FBA_DOI_CONTENTION: 40,

@@ -241,6 +241,95 @@ test('Tactical > AWD tops AWD up to the baseline', () => {
   assert.equal(d.cases, 5, 'the spec\'s 60 DOI target; Marco typed 10');
 });
 
+test('a comfortable SKU does not drag a pallet of filler along with it', () => {
+  // Marco's own case: one SKU on 40 days of AWD cover with FBA healthy behind
+  // it wants 5 cases. Filling to 25 would mean 20 cases of SKUs that needed
+  // nothing — more freight and more stock at AWD than doing nothing.
+  const c = cfg();
+  const rows = [tacAwdRow({ sku: 'COMFY', awdDoi: 40, awdQty: 400, fbaDoi: 90,
+    wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
+  const dec = G.planTacToAwd(rows, c, {});
+  assert.ok(dec[0].cases > 0, 'the ladder still wants stock');
+
+  const verdict = G.decideTacToAwdRun(rows, dec, c);
+  assert.equal(verdict.raise, false);
+  assert.match(verdict.why, /nothing urgent/);
+  assert.match(verdict.why, /COMFY at 40 DOI/);
+  assert.equal(dec[0].cases, 0, 'the lane is zeroed, not left with numbers');
+  assert.match(G.reasonText(dec[0], 20), /held for a later run/);
+  assert.match(G.reasonText(dec[0], 20), /not urgent/);
+});
+
+test('a thin SKU that FBA cannot cover justifies the run', () => {
+  const c = cfg();
+  const rows = [tacAwdRow({ sku: 'THIN', awdDoi: 20, awdQty: 200, fbaDoi: 25,
+    wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
+  const dec = G.planTacToAwd(rows, c, {});
+  const verdict = G.decideTacToAwdRun(rows, dec, c);
+  assert.equal(verdict.raise, true);
+  assert.match(verdict.why, /THIN \(20 DOI\)/);
+  assert.ok(dec[0].cases > 0);
+});
+
+test('an empty AWD shelf is not urgent when FBA is sitting on years of cover', () => {
+  // 101-2102, real: no AWD stock at all — 0 days of cover, which looks like
+  // the most urgent row in the book — while FBA holds 599 days and it sells a
+  // sixth of a unit a day. Reading AWD alone makes this SKU justify a pallet
+  // every week.
+  const c = cfg();
+  const rows = [tacAwdRow({ sku: '101-2102', rate: 0.16, awdDoi: 0, awdQty: 0,
+    fbaDoi: 599.1, wrDoi: 1875, caseQty: 50, availableCases: 6,
+    tacAvailableUnits: 300 })];
+  const dec = G.planTacToAwd(rows, c, {});
+  assert.ok(dec[0].cases > 0, 'the ladder still wants to top AWD up');
+  assert.equal(G.decideTacToAwdRun(rows, dec, c).raise, false,
+    'but it is the quietest SKU in the catalogue, not an emergency');
+});
+
+test('an empty AWD shelf IS urgent once FBA is thin too', () => {
+  const c = cfg();
+  const rows = [tacAwdRow({ sku: 'EMPTY', awdDoi: 0, awdQty: 0, fbaDoi: 25,
+    wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
+  const dec = G.planTacToAwd(rows, c, {});
+  assert.equal(G.decideTacToAwdRun(rows, dec, c).raise, true);
+});
+
+test('a held run is not padded to a pallet', () => {
+  const c = cfg();
+  const rows = [
+    tacAwdRow({ sku: 'COMFY', awdDoi: 40, awdQty: 400, fbaDoi: 90, wrDoi: 100,
+      caseQty: 20, availableCases: 40, tacAvailableUnits: 800 }),
+    tacAwdRow({ sku: 'SPARE', awdDoi: 70, awdQty: 700, fbaDoi: 90, wrDoi: 100,
+      caseQty: 20, availableCases: 40, tacAvailableUnits: 800 }),
+  ];
+  const input = { tacToAwd: rows, awdToFba: [], tacToFba: [], ltfIndex: {} };
+  const plan = G.planUsTransferOrders(input, c);
+
+  assert.equal(plan.totals.tacToAwdCases, 0, 'no cases at all, filler included');
+  assert.equal(plan.pallet.filledCases, 0);
+  assert.equal(plan.verdicts.tacToAwd.raise, false);
+  assert.match(plan.verdicts.tacToAwd.why, /nothing urgent/);
+});
+
+test('each lane says plainly whether to raise the order', () => {
+  const c = cfg();
+  const input = {
+    tacToAwd: [tacAwdRow({ sku: 'A', awdDoi: 5, fbaDoi: 10, wrDoi: 100,
+      caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })],
+    awdToFba: [awdFbaRow({ sku: 'A', rate: 10, amzTotal: 100, amzDoi: 10,
+      awdDoi: 100, caseQty: 20, availableCases: 50, awdAvailableUnits: 1000 })],
+    tacToFba: [],
+    ltfIndex: {},
+  };
+  const v = G.planUsTransferOrders(input, c).verdicts;
+
+  assert.equal(v.tacToAwd.raise, true);
+  assert.equal(v.awdToFba.raise, true);
+  assert.match(v.awdToFba.why, /1 SKU, 25 cases/);
+  assert.equal(v.tacToFba.raise, false);
+  assert.match(v.tacToFba.why, /AWD is covering every shortfall/);
+});
+
 test('the pallet minimum tops a short run up from SKUs nearest to needing it', () => {
   const c = cfg();
   // 5 cases of genuine demand, so the run is short of the 25-case pallet.
@@ -602,8 +691,10 @@ test('listing on the B2B tab only implies B2B when that is switched on', () => {
 test('the full pipeline runs the lanes in dependency order', () => {
   const c = cfg();
   const input = {
-    tacToAwd: [tacAwdRow({ sku: 'A', awdDoi: 10, wrDoi: 100, caseQty: 20,
-      availableCases: 40, tacAvailableUnits: 800, awdInbound14: 0 })],
+    // AWD genuinely thin and FBA cannot cover it, so the run is justified —
+    // this test is about lane ordering, not about the urgency gate.
+    tacToAwd: [tacAwdRow({ sku: 'A', awdDoi: 5, fbaDoi: 20, wrDoi: 100,
+      caseQty: 20, availableCases: 40, tacAvailableUnits: 800, awdInbound14: 0 })],
     awdToFba: [awdFbaRow({ sku: 'A', rate: 10, awdAvailableUnits: 40,
       availableCases: 2, awdDoi: 4, amzFulfillable: 300, amzTotal: 300,
       amzDoi: 30, caseQty: 20 })],

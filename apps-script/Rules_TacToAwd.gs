@@ -57,6 +57,98 @@ function isDiscontinued(r) {
 }
 
 /**
+ * Is this run worth raising at all?
+ *
+ * Asked before the pallet minimum, and answered on urgency rather than volume:
+ * the pallet is a constraint on a shipment, not a reason to make one. A SKU
+ * with 40 days of AWD cover and healthy FBA behind it can wait for a run where
+ * something is genuinely thin.
+ *
+ * Returns { urgent, reasons, thinnest } — `reasons` names the SKUs that
+ * justify the run, so the verdict can say why rather than just yes or no.
+ */
+function assessUrgency(rows, decisions, cfg) {
+  var R = cfg.RULES;
+  var urgent = [];
+  var thinnest = null;
+
+  rows.forEach(function (r, i) {
+    if (isDiscontinued(r) || !(r.rate > 0)) return;
+    if (!decisions[i] || decisions[i].cases <= 0) return;
+
+    if (thinnest === null || r.awdDoi < thinnest.awdDoi) thinnest = r;
+
+    // Both, not either. AWD is a buffer in front of FBA, so an empty buffer
+    // only matters when FBA is close enough to needing it.
+    var thin = r.awdDoi < R.TAC_TO_AWD_URGENCY_AWD_DOI;
+    var fbaCanHold = r.fbaDoi !== null && r.fbaDoi !== undefined
+      && r.fbaDoi >= R.TAC_TO_AWD_HEALTHY_FBA_DOI;
+
+    if (thin && !fbaCanHold) {
+      urgent.push({
+        sku: r.sku,
+        awdDoi: r.awdDoi,
+        fbaDoi: r.fbaDoi,
+        cases: decisions[i].cases,
+      });
+    }
+  });
+
+  urgent.sort(function (a, b) { return a.awdDoi - b.awdDoi; });
+  return { urgent: urgent, thinnest: thinnest };
+}
+
+/**
+ * The lane's verdict: raise this transfer order, or hold it for a later run.
+ *
+ * Holding zeroes the lane rather than leaving numbers nobody intends to ship,
+ * and every row that wanted stock says why it is being held instead.
+ */
+function decideTacToAwdRun(rows, decisions, cfg) {
+  var R = cfg.RULES;
+  var demand = decisions.reduce(function (s, d) { return s + (d.cases > 0 ? d.cases : 0); }, 0);
+  var assessment = assessUrgency(rows, decisions, cfg);
+
+  if (demand === 0) {
+    return {
+      raise: false, demandCases: 0, urgent: [],
+      why: 'nothing below the ' + dssFor(cfg, 'TAC_TO_AWD') + ' DOI target at AWD',
+    };
+  }
+
+  if (!assessment.urgent.length) {
+    var t = assessment.thinnest;
+    var why = 'nothing urgent — '
+      + (t ? 'thinnest is ' + t.sku + ' at ' + fmt(t.awdDoi) + ' DOI at AWD'
+        + (t.fbaDoi ? ', FBA on ' + fmt(t.fbaDoi) : '') : 'no SKU below '
+        + R.TAC_TO_AWD_URGENCY_AWD_DOI + ' DOI')
+      + '. ' + demand + ' cases of demand would need '
+      + clampMin0(R.PALLET_MIN_CASES - demand) + ' cases of filler to make a pallet';
+
+    rows.forEach(function (r, i) {
+      if (decisions[i].cases <= 0) return;
+      decisions[i] = decision(0, 'held for a later run', {
+        pass: 'NONE',
+        notes: ['would have sent ' + decisions[i].cases + ' cases, AWD on '
+          + fmt(r.awdDoi) + ' DOI — not urgent'],
+      });
+    });
+
+    return { raise: false, demandCases: demand, urgent: [], why: why, held: true };
+  }
+
+  return {
+    raise: true,
+    demandCases: demand,
+    urgent: assessment.urgent,
+    why: assessment.urgent.length + ' SKU' + (assessment.urgent.length === 1 ? '' : 's')
+      + ' running thin at AWD — ' + assessment.urgent.slice(0, 3).map(function (u) {
+        return u.sku + ' (' + fmt(u.awdDoi) + ' DOI)';
+      }).join(', ') + (assessment.urgent.length > 3 ? ' and others' : ''),
+  };
+}
+
+/**
  * §6.1 — Tactical>AWD ships palletised, so a run that goes at all must carry
  * at least 25 cases.
  *

@@ -53,10 +53,7 @@ function dryRun() {
   var input = readPlanningInput(ss, cfg);
   var plan = planUsTransferOrders(input, cfg);
 
-  var lines = [
-    'Tactical > AWD:  ' + plan.totals.tacToAwdCases + ' cases',
-    'AWD > FBA:       ' + plan.totals.awdToFbaCases + ' cases',
-    'Tactical > FBA:  ' + plan.totals.tacToFbaCases + ' cases',
+  var lines = verdictLines(plan).concat([
     '',
     'Pallet: ' + palletStatus(plan.pallet),
     'Needs review: ' + plan.totals.needsReview,
@@ -64,7 +61,7 @@ function dryRun() {
     'Floor breaches: ' + plan.totals.floorBreaches,
     '',
     'Tactical floor from: ' + input.meta.minUnitsSource,
-  ];
+  ]);
   SpreadsheetApp.getUi().alert('Dry run — nothing written', lines.join('\n'),
     SpreadsheetApp.getUi().ButtonSet.OK);
   return plan;
@@ -79,14 +76,27 @@ function runPlan(planner, cfg, ctx) {
   return { planner: planner, input: input, plan: plan };
 }
 
+/** The three verdicts, as the first thing any dialog says. */
+function verdictLines(plan) {
+  var v = plan.verdicts;
+  return [
+    'RAISE THIS ORDER?',
+    '',
+    (v.tacToAwd.raise ? '\u2713 ' : '\u2013 ') + 'Tactical > AWD:  '
+      + (v.tacToAwd.raise ? 'YES' : 'NO') + ' \u2014 ' + v.tacToAwd.why,
+    (v.awdToFba.raise ? '\u2713 ' : '\u2013 ') + 'AWD > FBA:       '
+      + (v.awdToFba.raise ? 'YES' : 'NO') + ' \u2014 ' + v.awdToFba.why,
+    (v.tacToFba.raise ? '\u2713 ' : '\u2013 ') + 'Tactical > FBA:  '
+      + (v.tacToFba.raise ? 'YES' : 'NO') + ' \u2014 ' + v.tacToFba.why,
+  ];
+}
+
 function report_(result, ss) {
   var p = result.plan;
   var ui = SpreadsheetApp.getUi();
   ui.alert('Plan built',
     ss.getName() + '\n\n'
-    + 'Tactical > AWD:  ' + p.totals.tacToAwdCases + ' cases\n'
-    + 'AWD > FBA:       ' + p.totals.awdToFbaCases + ' cases\n'
-    + 'Tactical > FBA:  ' + p.totals.tacToFbaCases + ' cases\n\n'
+    + verdictLines(p).join('\n') + '\n\n'
     + 'Pallet: ' + palletStatus(p.pallet) + '\n'
     + 'Needs review: ' + p.totals.needsReview + '\n'
     + 'LTF flagged: ' + p.totals.ltfHeld + '\n\n'

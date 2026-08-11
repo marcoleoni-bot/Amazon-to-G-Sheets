@@ -175,23 +175,67 @@ off. Flip it with one Script Property:
 RULES.PASS2_TRIGGER_DOI    60
 ```
 
-### Tactical ships about once in six runs
+### Tactical ships about once in six runs — and now the rules agree
 
-Across these six planners, Tactical → AWD shipped **once** (08-10, 35 cases)
-and Tactical → FBA **never**. The rules propose a Tactical → AWD load every
-run — 25 to 102 cases.
+The pallet minimum is a constraint on a shipment, not a reason to make one.
+Read the other way round it produces exactly the wrong answer: five cases of
+genuine need padded with twenty cases of SKUs that needed nothing, purely to
+fill a pallet. More work, more freight, more stock parked at AWD than doing
+nothing would have been.
 
-That gap is expected rather than wrong: small transfers get skipped when there
-is no urgency, because the work of raising them is not worth it. Automating the
-work removes that reason. Two things follow, and both are worth a look on the
-first live run: the 25-case pallet minimum is doing real work here, and the
-08-04 proposal of 102 cases is four pallets, which deserves a sanity check
-before it is accepted.
+So the lane now asks **whether the run is worth raising at all**, before the
+pallet minimum applies. A SKU is urgent only when *both* hold:
 
-On 08-10, the one run with a real comparison, the totals nearly agree — 35
-cases shipped against 36 proposed — but the distribution does not: three SKUs
-carried the whole load, where the rules spread 36 cases over about ten. Same
-truck, different pallets.
+```
+AWD cover  <  TAC_TO_AWD_URGENCY_AWD_DOI   (30)   — the buffer is thin
+AND FBA cover  <  TAC_TO_AWD_HEALTHY_FBA_DOI (60) — and FBA cannot bridge it
+```
+
+Both, not either — and that is the whole trick. `101-2102` holds no AWD stock
+at all, which reads as **0 days of cover**, the most alarming number on the
+tab. It also sits on **599 days at FBA** and sells a sixth of a unit a day.
+Read AWD alone and the quietest SKU in the catalogue justifies a pallet every
+week; that first cut of this rule raised a run on all six.
+
+If nothing is urgent, the lane is zeroed, each row that wanted stock says what
+it would have sent and why it is waiting, and the verdict names the thinnest
+SKU. Only once a run is justified does the pallet fill top it to 25, because by
+then the pallet is being paid for regardless.
+
+| Run | Reality | Verdict | Rows matching |
+|---|---|---|---|
+| 07-06-26 | nothing shipped | raise, 25 cases | 15/26 |
+| 07-13-26 | nothing shipped | **hold** | **30/30** |
+| 07-20-26 | nothing shipped | **hold** | **30/30** |
+| 07-27-26 | nothing shipped | **hold** | **30/30** |
+| 08-04-26 | nothing shipped | **hold** | **30/30** |
+| 08-10-26 | **35 cases** | **raise, 36 cases** | 17/29 |
+
+Five of six agree, including the one run that actually shipped. The miss is
+07-06, where `101-2110` (25 DOI) and `101-2003` (27 DOI) sit just under the
+threshold — tightening it to 25 would hold that run too, but six runs is not
+enough evidence to tune a threshold that finely.
+
+One knock-on worth watching: holding the AWD lane frees Tactical stock, so
+Tactical → FBA now proposes more than it did — 23 cases on 08-04 against the
+nothing that shipped. That lane is meant to be rare, so if it keeps proposing
+double figures it needs the same urgency treatment.
+
+## Every lane says whether to raise the order
+
+The first thing on the `Run header` tab, and the first thing both dialogs say:
+
+```
+RAISE THIS ORDER?
+Tactical → AWD    NO  — nothing urgent — thinnest is 101-2041 at 0 DOI at AWD,
+                        FBA on 82. 88 cases of demand would need 0 of filler
+AWD → FBA         YES — 29 SKUs, 112 cases
+Tactical → FBA    NO  — AWD is covering every shortfall
+```
+
+Green for raise, grey for hold, so a held lane cannot be mistaken for a live
+one. The `AWD TO FBA` tab stays the pick list — SKU, case qty, units, cases —
+and the full scenario for every SKU stays on the lane tab beside it.
 
 ## The Tactical floor
 

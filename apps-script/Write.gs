@@ -249,8 +249,18 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
 
   var c = ctx || {};
   var pallet = plan.pallet;
+  var v = plan.verdicts;
+
+  // The verdict goes first. "Do I raise this TO today, and why" is the whole
+  // question, and it should not need 491 rows of reading to answer.
   var lines = [
     ['US transfer order plan', ''],
+    ['', ''],
+    ['RAISE THIS ORDER?', ''],
+    [v.tacToAwd.lane, (v.tacToAwd.raise ? 'YES — ' : 'NO — ') + v.tacToAwd.why],
+    [v.awdToFba.lane, (v.awdToFba.raise ? 'YES — ' : 'NO — ') + v.awdToFba.why],
+    [v.tacToFba.lane, (v.tacToFba.raise ? 'YES — ' : 'NO — ') + v.tacToFba.why],
+    ['', ''],
     ['Built', Utilities.formatDate(new Date(), cfg.TIMEZONE, 'yyyy-MM-dd HH:mm z')],
     ['Snapshot', c.snapshot || 'live'],
     ['Lane values from', input.meta.laneSource],
@@ -288,7 +298,18 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
   sh.getRange(1, 1, lines.length, 2).setValues(lines);
   sh.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground(cfg.COLOURS.HEADER);
   sh.setColumnWidth(1, 260);
-  sh.setColumnWidth(2, 460);
+  sh.setColumnWidth(2, 560);
+
+  // Colour the three verdicts so a held lane cannot be mistaken for a live one.
+  var verdictAt = labelRow(lines, 'RAISE THIS ORDER?');
+  if (verdictAt) {
+    sh.getRange(verdictAt, 1, 1, 2).setFontWeight('bold')
+      .setBackground(cfg.COLOURS.HEADER);
+    [v.tacToAwd, v.awdToFba, v.tacToFba].forEach(function (lane, i) {
+      sh.getRange(verdictAt + 1 + i, 1, 1, 2)
+        .setBackground(lane.raise ? cfg.COLOURS.PASS_2 : cfg.COLOURS.PALLET_FILL);
+    });
+  }
 
   // §6.1: an under-full pallet is surfaced here rather than shipped quietly.
   if (pallet.shortfall > 0) {
