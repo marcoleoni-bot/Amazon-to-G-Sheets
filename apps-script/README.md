@@ -32,7 +32,14 @@ the three lanes with contention handling, and writes:
 
 ## Install
 
-With [clasp](https://github.com/google/clasp):
+**By hand — one paste.** Open the planner → Extensions → Apps Script. Delete
+the stub `Code.gs` contents, paste all of
+[`dist/Code.gs`](dist/Code.gs), Save. That file is every module concatenated;
+Apps Script runs them in one global scope anyway, so a single file behaves
+identically. Then Project Settings → time zone → *(GMT-05:00) New York*.
+
+**With [clasp](https://github.com/google/clasp)** if you'd rather keep the
+modules separate:
 
 ```bash
 npm i -g @google/clasp && clasp login
@@ -41,11 +48,12 @@ clasp create --type sheets --title "US TO Planner" --rootDir .
 clasp push
 ```
 
-Or paste each `.gs` file into Extensions → Apps Script by hand. Either way,
-reload the spreadsheet once so `onOpen` installs the menu.
+Either way, reload the spreadsheet once so `onOpen` installs the menu. Run
+**Dry run** first and accept the OAuth prompt — it needs Sheets (read/write),
+Drive (to make the dated copy) and the UI scope for the menu.
 
-Run **Build US plan** once and accept the OAuth prompt. It needs Sheets (read
-and write), Drive (to make the dated copy) and the UI scope for the menu.
+`dist/Code.gs` is generated. Edit the modules and run `npm run bundle`; a test
+fails if the bundle has drifted from them.
 
 ## Modules
 

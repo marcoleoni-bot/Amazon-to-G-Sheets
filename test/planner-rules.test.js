@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadAppsScript, awdFbaRow, tacAwdRow, tacFbaRow } from './helpers/load-gs.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import vm from 'node:vm';
+import { loadAppsScript, awdFbaRow, tacAwdRow, tacFbaRow, GS_DIR } from './helpers/load-gs.js';
 
 /**
  * The rule layer, exercised through the same .gs files the editor runs.
@@ -23,6 +26,19 @@ test('every .gs file parses and defines its entry points', () => {
     'buildPlan', 'backtest']) {
     assert.equal(typeof G[fn], 'function', `${fn} is not defined`);
   }
+});
+
+test('the one-file bundle is in step with the modules', () => {
+  // The bundle exists so installing by hand is one paste. That only helps if
+  // it is the same code — a stale bundle is worse than no bundle.
+  const bundle = readFileSync(join(GS_DIR, 'dist', 'Code.gs'), 'utf8');
+  for (const file of files) {
+    const src = readFileSync(join(GS_DIR, file), 'utf8').trimEnd();
+    assert.ok(bundle.includes(src),
+      `${file} has changed since the bundle was built — run: npm run bundle`);
+  }
+  assert.doesNotThrow(() => new vm.Script(bundle, { filename: 'Code.gs' }),
+    'the bundle must parse as one script');
 });
 
 // --------------------------------------------------------------------- Lib

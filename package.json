@@ -12,6 +12,7 @@
     "record:na": "playwright codegen --load-storage=.state/na.json https://sellercentral.amazon.com",
     "record:eu": "playwright codegen --load-storage=.state/eu.json https://sellercentral.amazon.co.uk",
     "baseline": "node src/baseline.js",
+    "bundle": "node apps-script/build-bundle.mjs",
     "test": "node --test test/*.js",
     "try": "node src/try.js",
     "start": "node src/index.js",
