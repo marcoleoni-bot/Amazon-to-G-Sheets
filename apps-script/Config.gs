@@ -1,0 +1,363 @@
+/**
+ * Every tunable number, ID and tab name for the US transfer-order planner.
+ *
+ * Nothing in the rule modules hard-codes a threshold. Marco tunes DSS per run
+ * today; that has to stay possible without touching logic, so the rules read
+ * everything from here and the run header records what was used.
+ *
+ * Overrides: Script Properties (File > Project properties > Script properties)
+ * beat the defaults below, so a threshold can be changed without an edit.
+ * Key names are the dotted paths shown in CONFIG_OVERRIDABLE.
+ */
+
+var CONFIG = {
+
+  // ---------------------------------------------------------------- sources
+
+  SOURCES: {
+    /** Marco's copy of the Inventory Monitoring Sheet. */
+    IMS_ID: '1ErXVAoJ6LKTM7mkIWo4SYsWZscCcEwGRqbdk3tCP2So',
+
+    /** `Transfer orders` — dated planners live under `MM. Month / US /`. */
+    TRANSFER_ORDERS_FOLDER_ID: '1SemIKHHXlDazC8q0TbIjxD0cvxkLY-CU',
+
+    /** Workbook holding the per-SKU Tactical floor. */
+    MIN_UNITS_ID: '14fW_-GacyK_8JDRE9Z1EomAE87S0rpnsJ9WkxKw7lCE',
+
+    /**
+     * Where the lane input columns are read from.
+     *
+     *   'planner' — read the planner's own lane tabs, which the template
+     *               populates from the IMS with the formulas already in it.
+     *               This is the default because it is also what makes a
+     *               back-test possible: a past planner carries its own
+     *               snapshot, the IMS does not.
+     *   'ims'     — read the IMS lane tabs directly (§10.1). Same layout, so
+     *               the same reader serves it; fill in IMS_LANE_TABS below.
+     */
+    LANES_FROM: 'planner',
+
+    /** Only needed when LANES_FROM is 'ims'. Layout must match §3. */
+    IMS_LANE_TABS: {
+      TAC_TO_AWD: '',
+      AWD_TO_FBA: '',
+      TAC_TO_FBA: '',
+    },
+  },
+
+  /**
+   * The per-SKU Tactical floor, read straight from MIN_UNITS_ID rather than
+   * through the planner's IMPORTRANGE (§2).
+   *
+   * `TAB` is blank until the tab is confirmed. While it is blank the reader
+   * falls back to the floor already sitting in the planner's own column B and
+   * says so in the run header, rather than silently treating the floor as zero.
+   */
+  MIN_UNITS: {
+    TAB: '',
+    HEADER_ROW: 1,
+    SKU_HEADER: 'SKU',
+    UNITS_HEADER: 'min. units at Tactical',
+    /** Used only if the headers above are not found on the tab. */
+    SKU_COL: 0,
+    UNITS_COL: 0,
+  },
+
+  // ------------------------------------------------------------------- tabs
+
+  TABS: {
+    // Note the trailing space on the Tactical > AWD tab. It is real.
+    TAC_TO_AWD: 'US TO Tactical > AWD ',
+    AWD_TO_FBA: 'US TO AWD > FBA',
+    TAC_TO_FBA: 'US TO Tactical > FBA',
+
+    SUMMARY_TAC_AWD: 'To transfer Tac-AWD',
+    SUMMARY_AWD_FBA: 'AWD TO FBA',
+    SUMMARY_TAC_FBA: 'To transfer Tac-FBA',
+
+    CSV_TAC_AWD: 'CSV upload TACTICAL AWD',
+    CSV_TAC_FBA: 'CSV upload TACTICAL FBA',
+    CSV_TO_TACTICAL: 'CSV to Tactical',
+
+    LTF: 'LTF',
+    CRITICAL: 'CRITICAL',
+    B2B: 'B2B',
+    PRODUCTS: 'Copy of Sheet1',
+
+    RUN_HEADER: 'Run header',
+  },
+
+  /** Header row and first data row, per §3. Lanes share these. */
+  LAYOUT: {
+    LANE_HEADER_ROW: 7,
+    LANE_FIRST_DATA_ROW: 8,
+
+    LTF_HEADER_ROW: 3,
+    CRITICAL_HEADER_ROW: 3,
+    PRODUCTS_HEADER_ROW: 1,
+    SUMMARY_HEADER_ROW: 1,
+    CSV_HEADER_ROW: 1,
+  },
+
+  /**
+   * Column indexes, 0-based, exactly as §3 lays them out.
+   * `REASON` is the new column immediately right of the last used one.
+   */
+  COLS: {
+    TAC_TO_AWD: {
+      B2B: 0,             // A
+      MIN_UNITS: 1,       // B
+      NAME: 2,            // C
+      MKT: 3,             // D
+      TRUE_RATE_30: 4,    // E
+      ORDER_PLAN_RATE: 5, // F
+      LIFECYCLE: 6,       // G
+      TAC_AVAILABLE: 7,   // H  units
+      AVAILABLE_CASES: 8, // I
+      WR_DOI: 9,          // J
+      AWD_QTY: 10,        // K
+      AWD_INBOUND_14: 11, // L
+      AWD_DOI: 12,        // M  (available + inbound)
+      CASES_OUT: 13,      // N  <- written
+      CASE_QTY: 14,       // O
+      UNITS_OUT: 15,      // P  <- written
+      CONTROL: 16,        // Q
+      TOTAL_DOI: 17,      // R
+      AWD_DOI_AFTER: 18,  // S
+      FBA_DOI: 21,        // V
+      REASON: 23,         // X  <- written
+    },
+
+    AWD_TO_FBA: {
+      B2B: 0,             // A
+      CRITICAL: 1,        // B
+      NAME: 2,            // C
+      MKT: 3,             // D
+      TRUE_RATE_30: 4,    // E
+      ORDER_PLAN_RATE: 5, // F
+      LIFECYCLE: 6,       // G
+      AWD_AVAILABLE: 7,   // H  units
+      AVAILABLE_CASES: 8, // I
+      AWD_DOI: 9,         // J
+      AMZ_FULFILLABLE: 10,// K  fulfillable + receiving
+      AMZ_RESERVED: 11,   // L
+      AMZ_INBOUND: 12,    // M
+      AMZ_TOTAL: 13,      // N
+      AMZ_DOI: 14,        // O
+      CASES_OUT: 15,      // P  <- written
+      CASE_QTY: 16,       // Q
+      UNITS_OUT: 17,      // R  <- written
+      CONTROL: 18,        // S
+      TOTAL_DOI: 19,      // T
+      AMZ_DOI_AFTER: 20,  // U
+      RESERVED_RATIO: 23, // X
+      AVAILABLE_ONLY_DOI: 24, // Y  <- recomputed on order_plan_rate (§4)
+      REASON: 29,         // AD <- written
+    },
+
+    TAC_TO_FBA: {
+      B2B: 0,             // A
+      MIN_UNITS: 1,       // B
+      CRITICAL: 2,        // C
+      NAME: 3,            // D
+      MKT: 4,             // E
+      TRUE_RATE_30: 5,    // F
+      ORDER_PLAN_RATE: 6, // G
+      LIFECYCLE: 7,       // H
+      TAC_AVAILABLE: 8,   // I  units
+      AVAILABLE_CASES: 9, // J
+      TAC_DOI: 10,        // K
+      AMZ_FULFILLABLE: 11,// L
+      AMZ_RESERVED: 12,   // M
+      AMZ_INBOUND: 13,    // N
+      AMZ_TOTAL: 14,      // O
+      AMZ_DOI: 15,        // P
+      CASES_OUT: 16,      // Q  <- written
+      CASE_QTY: 17,       // R
+      UNITS_OUT: 18,      // S  <- written
+      CONTROL: 19,        // T
+      TOTAL_DOI: 20,      // U
+      AMZ_DOI_AFTER: 21,  // V
+      AWD_AVAILABLE: 22,  // W
+      TO_AWD_TO_FBA: 23,  // X
+      REASON: 24,         // Y  <- written
+    },
+
+    /** LTF: header on row 3, SKU in B, market in A, the comment in Q. */
+    LTF: { MARKET: 0, SKU: 1, DESCRIPTION: 2, COMMENT: 16 },
+
+    /** CRITICAL: header on row 3, SKU list in B. */
+    CRITICAL: { SKU: 1 },
+
+    /** Copy of Sheet1: name -> Amazon SKU, case size, discontinued flag. */
+    PRODUCTS: { NAME: 0, AMAZON_SKU: 1, CASE_QTY: 4, DISCONTINUED: 16 },
+  },
+
+  // -------------------------------------------------------------- rule dials
+
+  RULES: {
+    /** Baseline days-of-inventory target, all lanes (§4). */
+    DSS: 60,
+
+    /**
+     * Per-lane DSS override. Null means "use DSS".
+     * The 08-10 planner ran AWD>FBA at 50; set it here to reproduce that run
+     * rather than editing the rules.
+     */
+    DSS_BY_LANE: {
+      TAC_TO_AWD: null,
+      AWD_TO_FBA: null,
+      TAC_TO_FBA: null,
+    },
+
+    /** Top-up target for B2B and Critical SKUs (§5 pass 2, §7). */
+    PRIORITY_DOI: 100,
+
+    /** Pass 1: reserved-blocked. */
+    PASS1_RESERVED_RATIO: 0.5,   // X = Reserved / Fulfillable must exceed this
+    PASS1_AVAILABLE_DOI: 42,     // Y = available-only DOI must be under this
+    PASS1_DOI_CAP: 100,          // cap A
+    PASS1_SINGLE_CASE_CAP: 110,  // cap B: one case may land up to here
+
+    /** Pass 2: flag when the suggestion eats this share of AWD stock. */
+    PASS2_LARGE_SHARE_OF_AWD: 0.5,
+
+    /** Pass 3: propose it, but ask for a second look above this. */
+    REVIEW_ABOVE_CASES: 7,
+
+    /** Tactical>AWD ships on pallets. */
+    PALLET_MIN_CASES: 25,
+    PALLET_FILL_MAX_AWD_DOI: 100,     // §12, still to be confirmed by Marco
+    PALLET_FILL_MAX_CASES_PER_SKU: 2, // §12, still to be confirmed by Marco
+
+    /** Contention: below this FBA DOI, Tactical serves FBA before AWD (§8). */
+    FBA_DOI_CONTENTION: 40,
+
+    /** Tactical>FBA floor-breach exception (§7.1). */
+    FLOOR_BREACH_MAX_FBA_DOI: 30,
+    FLOOR_BREACH_RESTORE_DOI: 60,
+    /** How far off "roughly 60 DOI" still counts as restoring the baseline. */
+    FLOOR_BREACH_RESTORE_TOLERANCE: 0.25,
+
+    /**
+     * §7 gate 4, "the resulting FBA DOI does not spike", needs a ceiling.
+     * Pass 1 gives the only worked example of how far an indivisible case may
+     * overshoot a target: 100 -> 110. That ratio is reused here, so the
+     * ceiling is 1.1x whichever target applies.
+     */
+    TAC_TO_FBA_SPIKE_MULTIPLIER: 1.1,
+
+    /**
+     * §7 states the Tactical>FBA quantity two ways: "the smaller of 1 case and
+     * the cases to reach target", then "1 case, unless more is needed to reach
+     * the target". Its own worked example is 4 cases, so the second reading
+     * governs by default.
+     *
+     *   'to_target'   — at least 1 case, up to the target. (default)
+     *   'single_case' — never more than 1 case.
+     */
+    TAC_TO_FBA_QTY_MODE: 'to_target',
+
+    /**
+     * §4: the run is one snapshot, so Tactical>AWD computed in this run is not
+     * treated as AWD replenishment when gating Tactical>FBA.
+     */
+    TAC_TO_FBA_COUNTS_THIS_RUN_AS_INBOUND: false,
+  },
+
+  OUTPUT: {
+    /** Regenerate the summary and CSV tabs from the accepted numbers. */
+    WRITE_SUMMARIES: true,
+    WRITE_CSV_TABS: true,
+
+    /** Write the recomputed available-only DOI back into column Y (§4). */
+    WRITE_RECOMPUTED_Y: true,
+
+    /**
+     * LTF rows carry their comment into the summary tabs' LTF column, which is
+     * what those columns are for. Set false to hold them off the pick list.
+     */
+    LTF_IN_SUMMARIES: true,
+
+    SHIP_METHOD_TAC_AWD: 'Amazon partnered carrier',
+    SHIP_METHOD_TAC_FBA: 'Amazon inbound parcel',
+  },
+
+  /** §9.3. Any legible scheme is acceptable; this is the one in use. */
+  COLOURS: {
+    PASS_1: '#cfe2f3',       // light blue  — reserved-blocked
+    PASS_2: '#d9ead3',       // light green — B2B / Critical
+    PASS_3: null,            // no fill     — baseline
+    NEEDS_REVIEW: '#fce5cd', // amber
+    LTF: '#f4cccc',          // red
+    PALLET_FILL: '#efefef',  // light grey
+    FLOOR_BREACH_BORDER: '#cc0000',
+    HEADER: '#d0e0e3',
+  },
+
+  /** Month folder names under `Transfer orders`, e.g. `08. August`. */
+  MONTH_FOLDERS: ['01. January', '02. February', '03. March', '04. April',
+    '05. May', '06. June', '07. July', '08. August',
+    '09. September', '10. October', '11. November', '12. December'],
+
+  MARKET: 'US',
+  TIMEZONE: 'America/New_York',
+};
+
+/** Script Property keys that may override a CONFIG value, by dotted path. */
+var CONFIG_OVERRIDABLE = [
+  'RULES.DSS',
+  'RULES.DSS_BY_LANE.TAC_TO_AWD',
+  'RULES.DSS_BY_LANE.AWD_TO_FBA',
+  'RULES.DSS_BY_LANE.TAC_TO_FBA',
+  'RULES.PRIORITY_DOI',
+  'RULES.PASS1_RESERVED_RATIO',
+  'RULES.PASS1_AVAILABLE_DOI',
+  'RULES.PASS1_DOI_CAP',
+  'RULES.PASS1_SINGLE_CASE_CAP',
+  'RULES.PASS2_LARGE_SHARE_OF_AWD',
+  'RULES.REVIEW_ABOVE_CASES',
+  'RULES.PALLET_MIN_CASES',
+  'RULES.PALLET_FILL_MAX_AWD_DOI',
+  'RULES.PALLET_FILL_MAX_CASES_PER_SKU',
+  'RULES.FBA_DOI_CONTENTION',
+  'RULES.TAC_TO_FBA_QTY_MODE',
+  'SOURCES.LANES_FROM',
+  'MIN_UNITS.TAB',
+];
+
+/**
+ * CONFIG with any Script Property overrides applied. Call this rather than
+ * reading CONFIG directly, so an override always takes effect.
+ */
+function config() {
+  var cfg = JSON.parse(JSON.stringify(CONFIG));
+  var props;
+  try {
+    props = PropertiesService.getScriptProperties().getProperties();
+  } catch (e) {
+    return cfg; // not inside Apps Script (unit tests)
+  }
+  CONFIG_OVERRIDABLE.forEach(function (path) {
+    if (!Object.prototype.hasOwnProperty.call(props, path)) return;
+    var raw = props[path];
+    var value = raw === '' ? null : (isNaN(Number(raw)) ? raw : Number(raw));
+    setByPath(cfg, path, value);
+  });
+  return cfg;
+}
+
+function setByPath(obj, path, value) {
+  var parts = path.split('.');
+  var node = obj;
+  for (var i = 0; i < parts.length - 1; i++) node = node[parts[i]];
+  node[parts[parts.length - 1]] = value;
+}
+
+/** The DSS in force for a lane: the lane override, else the baseline. */
+function dssFor(cfg, laneKey) {
+  var override = cfg.RULES.DSS_BY_LANE[laneKey];
+  return (override === null || override === undefined || override === '')
+    ? cfg.RULES.DSS
+    : Number(override);
+}

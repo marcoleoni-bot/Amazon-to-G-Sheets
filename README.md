@@ -1,5 +1,10 @@
 # amazon-report-bot
 
+> Also in this repo: [`apps-script/`](apps-script/README.md) — the US Transfer
+> Order Planner, a separate Apps Script deliverable that suggests case
+> quantities per SKU per lane. Different runtime, different sheet, no shared
+> code; `npm test` covers both.
+
 A temporary bridge. It logs into Seller Central in a saved browser session, downloads the same reports you download by hand, and writes them into the sixteen raw tabs of *Copy of OPS Intelligence Hub* — preserving each tab's exact column layout so `Calc_Data` keeps working untouched.
 
 Intended lifespan: about a month, until the tech team does the structural work. It is built to fail loudly and be easy to re-record, not to be elegant.
