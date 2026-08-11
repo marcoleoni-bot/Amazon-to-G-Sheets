@@ -131,6 +131,35 @@ test('pass 2 holds B2B and Critical at 100 DOI, and stops at the shelf', () => {
   assert.match(G.reasonText(d, 12), /capped by AWD stock/);
 });
 
+test('a pass 2 trigger stops topping up SKUs that are still comfortable', () => {
+  // 07-20-26 101-2104: Critical, sitting on 88 DOI with 29 cases in AWD.
+  // The spec has no trigger, so pass 2 pushes it to 100 every run — 8 cases.
+  // Nothing shipped for it that week.
+  const row = awdFbaRow({
+    sku: '101-2104', b2b: true, critical: true, rate: 10, awdAvailableUnits: 464,
+    availableCases: 29, awdDoi: 46, amzFulfillable: 880, amzTotal: 880,
+    amzDoi: 88, caseQty: 16,
+  });
+  assert.equal(G.planAwdToFba([row], cfg(), {})[0].cases, 8, 'spec default');
+
+  const gated = cfg();
+  gated.RULES.PASS2_TRIGGER_DOI = 60;
+  const [d] = G.planAwdToFba([row], gated, {});
+  assert.equal(d.cases, 0);
+  assert.equal(d.pass, 'PASS_3', 'it falls through to the baseline rule');
+});
+
+test('a priority SKU below the trigger is still topped to 100', () => {
+  const gated = cfg();
+  gated.RULES.PASS2_TRIGGER_DOI = 60;
+  const row = awdFbaRow({ b2b: true, rate: 10, awdAvailableUnits: 1000,
+    availableCases: 50, awdDoi: 100, amzFulfillable: 500, amzTotal: 500,
+    amzDoi: 50, caseQty: 20 });
+  const [d] = G.planAwdToFba([row], gated, {});
+  assert.equal(d.pass, 'PASS_2');
+  assert.equal(d.cases, 25); // (100-50)*10/20
+});
+
 test('a priority SKU already past target is left alone', () => {
   // 101-2092-B sits at 106.6 DOI. Marco typed 0.
   const row = awdFbaRow({
@@ -469,6 +498,27 @@ test('a lane DSS override changes the target without touching the rules', () => 
   assert.equal(G.planAwdToFba([row], c, {})[0].cases, 0, 'past 50, nothing moves');
   const at60 = cfg();
   assert.ok(G.planAwdToFba([row], at60, {})[0].cases > 0, 'at 60 it still wants stock');
+});
+
+// -------------------------------------------- what actually shipped, or not
+
+test('a planner name yields the date its shipment should carry', () => {
+  assert.equal(G.plannerDate('08-10-26').getFullYear(), 2026);
+  assert.equal(G.plannerDate('08-10-26').getMonth(), 7);
+  assert.equal(G.plannerDate('08-10-26').getDate(), 10);
+  // Two of the real files are named with a leading space.
+  assert.ok(G.plannerDate(' 07-13-26'), 'a leading space must not defeat it');
+  assert.equal(G.plannerDate('Template'), null, 'no date rather than a guess');
+});
+
+test('a CSV row is this run\'s only if its trandate is this run\'s day', () => {
+  const day = G.plannerDate('08-10-26');
+  assert.equal(G.isSameDay(new Date(2026, 7, 10), day), true);
+  assert.equal(G.isSameDay(new Date(2026, 6, 28), day), false, 'the 07-28 rows are stale');
+  assert.equal(G.isSameDay(46244, day), true, 'sheet serial for 2026-08-10');
+  assert.equal(G.isSameDay(46231, day), false, 'sheet serial for 2026-07-28');
+  assert.equal(G.isSameDay('', day), false, 'an empty cell is not a shipment');
+  assert.equal(G.isSameDay(46244, null), false, 'no planner date, no match');
 });
 
 // ------------------------------------------------------- the Tactical floor

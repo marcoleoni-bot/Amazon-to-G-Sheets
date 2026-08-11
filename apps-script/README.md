@@ -76,7 +76,7 @@ the same way Apps Script concatenates them, so the tests exercise shipped code
 rather than a Node-flavoured copy of it.
 
 ```bash
-npm test                                  # 41 rule tests, no network
+npm test                                  # 45 rule tests, no network
 node --test test/planner-rules.test.js
 ```
 
@@ -108,50 +108,90 @@ in.
 ## Back-testing
 
 **Transfer Orders → Back-test this file against its own numbers** replays a
-past planner through the live rules and writes a `Back-test` tab: per-lane
-match counts, then every difference with the inputs beside both numbers. It
-reads only — it never overwrites the lane columns of the file under test.
+past planner through the live rules and writes a `Back-test` tab. It reads
+only — it never touches the lane columns of the file under test.
 
-### Results against `08-10-26`
+**What it compares against matters more than anything else here.** Not the lane
+decision columns: those travel with the file when it is copied, so they hold a
+blend of several weeks' typing. What actually shipped is recorded elsewhere:
 
-Run at spec defaults (DSS 60 on every lane):
+| Lane | Truth |
+|---|---|
+| Tactical → AWD | `CSV upload TACTICAL AWD` |
+| Tactical → FBA | `CSV upload TACTICAL FBA` |
+| AWD → FBA | the `AWD TO FBA` pick list |
 
-| Lane | Rows | Same | Differ | Cases typed | Cases script |
-|---|---|---|---|---|---|
-| AWD → FBA | 491 | 471 | 20 | 122 | 129 |
-| Tactical → AWD | 29 | 18 | 11 | 51 | 36 |
-| Tactical → FBA | 29 | 27 | 2 | 16 | 1 |
+and the CSV tabs carry a `trandate`. **A CSV tab that is empty, or dated to
+another day, means nothing shipped on that lane that run** — zeros, not missing
+data. The script now stamps the trandate with the planner's own date rather
+than today's, so the convention keeps working on files it writes.
 
-96% agreement on the lane that matters most, with the rules reproducing Marco
-exactly on rows like `101-2047` (16 cases), `101-2110` (6, capped by AWD
-stock), `401-1037-ALS` (1, reserved-blocked) and every SKU already past target.
+### Results across six runs
 
-The differences are the interesting part. Each is either a bug here or a rule
-nobody has written down, and they cluster:
+`07-06`, `07-13`, `07-20`, `07-27`, `08-04`, `08-10`, at spec defaults:
 
-1. **Pass precedence.** `101-1015-V2` is both reserved-blocked and Critical.
-   §5 gives pass 1 the claim, which yields 2 cases; Marco typed 8, the pass 2
-   number. Either §5's ordering is wrong, or priority SKUs should be exempt
-   from pass 1.
+| Run | AWD → FBA rows matching | Cases shipped | Cases script |
+|---|---|---|---|
+| 07-06-26 | 461/491 (94%) | 115 | 187 |
+| 07-13-26 | 467/491 (95%) | 75 | 132 |
+| 07-20-26 | 468/491 (95%) | 97 | 243 |
+| 07-27-26 | 466/491 (95%) | 135 | 200 |
+| 08-04-26 | 459/491 (93%) | 147 | 201 |
+| 08-10-26 | 463/491 (94%) | 112 | 129 |
+| **total** | **2784/2946 (94.5%)** | **681** | **1092** |
 
-2. **Tactical → AWD ran at roughly double the 60 DOI target.** `401-1001-G`
-   typed 20 against 10, `101-2106` 10 against 5, `101-2112` 10 against 7.
-   Re-running that lane at DSS 100 reproduces the first two exactly. The likely
-   explanation is the 25-case pallet: Marco reached it by topping up SKUs that
-   already had demand, where §6.1 reaches it by adding cases from a separate
-   filler pool. Both get a full pallet; they load different SKUs. **This is the
-   one worth settling before go-live**, because it changes what ships, not just
-   how much.
+Row agreement is steady at ~94.5%. The volume is not: the script proposes 60%
+more cases than actually left AWD, and the bias is one-sided — 116 rows where
+it sends more against 46 where it sends less.
 
-3. **A discontinued SKU shipped to AWD.** `401-1020-S`, 2 cases. §6 excludes
-   discontinued "no exceptions", so the script sends 0.
+### One rule explains almost all of it
 
-4. **`101-2040` cascades.** The script tops it to 100 DOI on the AWD lane (31
-   cases against Marco's 20), which fully covers FBA and so closes the residual
-   lane — where Marco also sent 4 cases from Tactical. One root cause, two
-   rows of difference.
+§5 pass 2 has no DOI trigger. Its gate is "B2B **or** Critical", so a priority
+SKU is topped to 100 DOI on *every* run — including one already sitting on 88.
+On 07-20, `101-2104` (Critical, 88 DOI) draws 8 cases from the rules and
+shipped none; `101-2110` (B2B, 49 DOI) draws all 81 cases in AWD against the
+22 that shipped.
 
-Rebuild `08-04-26`, `06-29-26` and `06-22-26` the same way before going live.
+Adding a trigger — top up only once cover falls below the baseline — fixes the
+bias almost exactly:
+
+| Pass 2 fires | Rows matching | Cases script vs 681 shipped | Rows over/under |
+|---|---|---|---|
+| always (spec, default) | 94.5% | 1092 (+60%) | 116 / 46 |
+| **below 60 DOI** | **94.8%** | **658 (−3%)** | **77 / 75** |
+| below 70 DOI | 94.7% | 831 (+22%) | 88 / 68 |
+| below 80 DOI | 94.7% | 944 (+39%) | 98 / 58 |
+| never | 94.9% | 349 (−49%) | 66 / 84 |
+
+At 60 the total volume lands within 3% and the over/under split becomes even —
+the signature of a corrected bias rather than a tuned fit. 60 is also the
+baseline the spec already uses, which makes the rule read coherently: *a
+priority SKU that drops below the baseline is restored to 100 rather than 60.*
+
+The default is still the spec's behaviour, because the spec is what was signed
+off. Flip it with one Script Property:
+
+```
+RULES.PASS2_TRIGGER_DOI    60
+```
+
+### Tactical ships about once in six runs
+
+Across these six planners, Tactical → AWD shipped **once** (08-10, 35 cases)
+and Tactical → FBA **never**. The rules propose a Tactical → AWD load every
+run — 25 to 102 cases.
+
+That gap is expected rather than wrong: small transfers get skipped when there
+is no urgency, because the work of raising them is not worth it. Automating the
+work removes that reason. Two things follow, and both are worth a look on the
+first live run: the 25-case pallet minimum is doing real work here, and the
+08-04 proposal of 102 cases is four pallets, which deserves a sanity check
+before it is accepted.
+
+On 08-10, the one run with a real comparison, the totals nearly agree — 35
+cases shipped against 36 proposed — but the distribution does not: three SKUs
+carried the whole load, where the rules spread 36 cases over about ten. Same
+truck, different pallets.
 
 ## The Tactical floor
 
@@ -178,23 +218,25 @@ SKUs and nothing else.
 
 ## What needs a decision
 
-Three things are genuinely undecided. All three are config constants, so
-settling them is a value change, not an edit.
+Four, all config values — settling them is a value change, not an edit.
 
-1. **The pallet-fill ceiling** (§12, explicitly left open).
+1. **The pass 2 trigger** (`RULES.PASS2_TRIGGER_DOI`). See above. This is the
+   one with volume behind it: it is worth 60% of the proposed cases on the
+   lane that runs every week.
+
+2. **The pallet-fill ceiling** (§12, explicitly left open).
    `PALLET_FILL_MAX_AWD_DOI` defaults to 100 and
    `PALLET_FILL_MAX_CASES_PER_SKU` to 2. Both conservative. With only two
-   eligible SKUs the second one caps the fill at 4 cases, and the run header
+   eligible SKUs the second caps the fill at 4 cases, and the run header
    reports the shortfall rather than shipping an under-full pallet.
 
-2. **§7's quantity, which is stated twice and not identically.** "The smaller
-   of (a) 1 case and (b) cases to reach the target" is a minimum; "1 case,
-   unless more is needed to reach the target" is a maximum. The worked example
-   is 4 cases, and Marco's real `101-2040` row is 4 cases where 4 were
-   available, so the second reading is the default (`TAC_TO_FBA_QTY_MODE:
-   'to_target'`). `'single_case'` gives the first.
+3. **§7's quantity, stated twice and not identically.** "The smaller of (a) 1
+   case and (b) cases to reach the target" is a minimum; "1 case, unless more
+   is needed to reach the target" is a maximum. The worked example is 4 cases,
+   and the real `101-2040` row is 4 cases where 4 were available, so the second
+   reading is the default (`TAC_TO_FBA_QTY_MODE: 'to_target'`).
 
-3. **The Tactical → FBA spike ceiling.** §7 gate 4 says the resulting FBA DOI
+4. **The Tactical → FBA spike ceiling.** §7 gate 4 says the resulting FBA DOI
    must not spike but gives no number. Pass 1 is the only worked example of how
    far an indivisible case may overshoot — 100 to 110 — so that 1.1 ratio is
    reused (`TAC_TO_FBA_SPIKE_MULTIPLIER`).
@@ -202,8 +244,9 @@ settling them is a value change, not an edit.
 One reading in §7 is worth flagging because it changes behaviour sharply.
 "Discontinued → 100 DOI cap, never exceed" is a *cap*, not a target — it is
 the only one of the three phrased that way. Read as a target it pushes 205
-units of a liquidating SKU into FBA on the 08-10 data, against Marco's 12. So
-discontinued SKUs get the minimum viable quantity and a hard 100 DOI ceiling.
+units of a liquidating SKU into FBA on the 08-10 data, against the 12 that
+shipped. So discontinued SKUs get the minimum viable quantity and a hard 100
+DOI ceiling.
 
 Also worth knowing: the 08-10 planner had `DSS` set to **50** on the AWD → FBA
 tab, not the 60 the spec calls for. The spec wins by default; set

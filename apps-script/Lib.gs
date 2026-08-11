@@ -107,6 +107,33 @@ function addFlag(d, flag) {
   return d;
 }
 
+/**
+ * The date a planner is for, from its name — `08-10-26`, sometimes with a
+ * stray leading space. Returns null when the name is not a date, in which case
+ * callers fall back to today rather than guessing.
+ */
+function plannerDate(name) {
+  var m = String(name || '').trim().match(/(\d{2})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  return new Date(2000 + Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+}
+
+/** Whether a cell holding a date or a sheet serial falls on `date`. */
+function isSameDay(cell, date) {
+  if (!date) return false;
+  var d = cell;
+  if (typeof cell === 'number') {
+    d = new Date(Date.UTC(1899, 11, 30) + cell * 86400000);
+    return d.getUTCFullYear() === date.getFullYear()
+      && d.getUTCMonth() === date.getMonth()
+      && d.getUTCDate() === date.getDate();
+  }
+  if (!(d instanceof Date)) return false;
+  return d.getFullYear() === date.getFullYear()
+    && d.getMonth() === date.getMonth()
+    && d.getDate() === date.getDate();
+}
+
 /** Round for display without dragging in a locale. */
 function fmt(n, places) {
   var p = places === undefined ? 0 : places;

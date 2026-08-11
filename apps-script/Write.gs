@@ -197,16 +197,21 @@ function writeSummaries(planner, input, plan, cfg) {
  */
 function writeCsvTabs(planner, input, plan, cfg) {
   var H = cfg.LAYOUT.CSV_HEADER_ROW;
-  var today = new Date();
+
+  // The trandate is what tells a later reader whether these rows belong to
+  // this run or were carried in with the file — a CSV tab dated to another
+  // day means nothing shipped from Tactical that week. So it is stamped with
+  // the planner's own date, not with today's.
+  var stamp = plannerDate(planner.getName()) || new Date();
 
   var awd = accepted(input.tacToAwd, plan.tacToAwd, cfg).map(function (x) {
-    return ['', today, cfg.OUTPUT.SHIP_METHOD_TAC_AWD, x.row.sku,
+    return ['', stamp, cfg.OUTPUT.SHIP_METHOD_TAC_AWD, x.row.sku,
       x.dec.cases * x.row.caseQty, ''];
   });
   replaceBelowHeader(sheetByName(planner, cfg.TABS.CSV_TAC_AWD), H, awd, 6);
 
   var fba = accepted(input.tacToFba, plan.tacToFba, cfg).map(function (x) {
-    return ['', today, cfg.OUTPUT.SHIP_METHOD_TAC_FBA, x.row.sku,
+    return ['', stamp, cfg.OUTPUT.SHIP_METHOD_TAC_FBA, x.row.sku,
       x.dec.cases * x.row.caseQty, ''];
   });
   replaceBelowHeader(sheetByName(planner, cfg.TABS.CSV_TAC_FBA), H, fba, 6);

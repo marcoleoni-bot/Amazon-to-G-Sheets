@@ -245,6 +245,21 @@ var CONFIG = {
     /** Top-up target for B2B and Critical SKUs (§5 pass 2, §7). */
     PRIORITY_DOI: 100,
 
+    /**
+     * How thin a B2B/Critical SKU must get before pass 2 tops it back up.
+     *
+     * §5 gives pass 2 no DOI trigger — the gate is "B2B or Critical", so a
+     * priority SKU is pushed to 100 DOI on every run, including one already
+     * sitting at 88. Across six back-tested runs that is the single largest
+     * source of over-shipping against what actually left AWD.
+     *
+     * null keeps the spec's behaviour, which is the default because the spec
+     * is what was signed off. Set it to a number (60 is the obvious candidate)
+     * to fire pass 2 only once cover has dropped below it. See the README —
+     * this is the open question with the most volume behind it.
+     */
+    PASS2_TRIGGER_DOI: null,
+
     /** Pass 1: reserved-blocked. */
     PASS1_RESERVED_RATIO: 0.5,   // X = Reserved / Fulfillable must exceed this
     PASS1_AVAILABLE_DOI: 42,     // Y = available-only DOI must be under this
@@ -343,6 +358,7 @@ var CONFIG_OVERRIDABLE = [
   'RULES.DSS_BY_LANE.AWD_TO_FBA',
   'RULES.DSS_BY_LANE.TAC_TO_FBA',
   'RULES.PRIORITY_DOI',
+  'RULES.PASS2_TRIGGER_DOI',
   'RULES.PASS1_RESERVED_RATIO',
   'RULES.PASS1_AVAILABLE_DOI',
   'RULES.PASS1_DOI_CAP',
@@ -507,6 +523,33 @@ function addFlag(d, flag) {
   return d;
 }
 
+/**
+ * The date a planner is for, from its name — `08-10-26`, sometimes with a
+ * stray leading space. Returns null when the name is not a date, in which case
+ * callers fall back to today rather than guessing.
+ */
+function plannerDate(name) {
+  var m = String(name || '').trim().match(/(\d{2})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  return new Date(2000 + Number(m[3]), Number(m[1]) - 1, Number(m[2]));
+}
+
+/** Whether a cell holding a date or a sheet serial falls on `date`. */
+function isSameDay(cell, date) {
+  if (!date) return false;
+  var d = cell;
+  if (typeof cell === 'number') {
+    d = new Date(Date.UTC(1899, 11, 30) + cell * 86400000);
+    return d.getUTCFullYear() === date.getFullYear()
+      && d.getUTCMonth() === date.getMonth()
+      && d.getUTCDate() === date.getDate();
+  }
+  if (!(d instanceof Date)) return false;
+  return d.getFullYear() === date.getFullYear()
+    && d.getMonth() === date.getMonth()
+    && d.getDate() === date.getDate();
+}
+
 /** Round for display without dragging in a locale. */
 function fmt(n, places) {
   var p = places === undefined ? 0 : places;
@@ -571,6 +614,10 @@ function planAwdToFba(rows, cfg, ltfIndex) {
     if (out[i]) return;
     if (!hasRate(r)) return;
     if (!(r.b2b || r.critical)) return;
+    // A priority SKU that is still comfortable does not need topping up; see
+    // PASS2_TRIGGER_DOI. null means the spec's behaviour — always.
+    if (R.PASS2_TRIGGER_DOI !== null && R.PASS2_TRIGGER_DOI !== undefined
+        && r.amzDoi >= R.PASS2_TRIGGER_DOI) return;
     out[i] = pass2(r, R, remaining);
   });
 
@@ -1831,16 +1878,21 @@ function writeSummaries(planner, input, plan, cfg) {
  */
 function writeCsvTabs(planner, input, plan, cfg) {
   var H = cfg.LAYOUT.CSV_HEADER_ROW;
-  var today = new Date();
+
+  // The trandate is what tells a later reader whether these rows belong to
+  // this run or were carried in with the file — a CSV tab dated to another
+  // day means nothing shipped from Tactical that week. So it is stamped with
+  // the planner's own date, not with today's.
+  var stamp = plannerDate(planner.getName()) || new Date();
 
   var awd = accepted(input.tacToAwd, plan.tacToAwd, cfg).map(function (x) {
-    return ['', today, cfg.OUTPUT.SHIP_METHOD_TAC_AWD, x.row.sku,
+    return ['', stamp, cfg.OUTPUT.SHIP_METHOD_TAC_AWD, x.row.sku,
       x.dec.cases * x.row.caseQty, ''];
   });
   replaceBelowHeader(sheetByName(planner, cfg.TABS.CSV_TAC_AWD), H, awd, 6);
 
   var fba = accepted(input.tacToFba, plan.tacToFba, cfg).map(function (x) {
-    return ['', today, cfg.OUTPUT.SHIP_METHOD_TAC_FBA, x.row.sku,
+    return ['', stamp, cfg.OUTPUT.SHIP_METHOD_TAC_FBA, x.row.sku,
       x.dec.cases * x.row.caseQty, ''];
   });
   replaceBelowHeader(sheetByName(planner, cfg.TABS.CSV_TAC_FBA), H, fba, 6);
@@ -1953,7 +2005,12 @@ function palletStatus(p) {
 
 /**
  * §10.3 — replay a past planner through the live rules and diff the result
- * against what Marco actually typed.
+ * against what actually shipped.
+ *
+ * Note "shipped", not "typed". The lane decision columns travel with the file
+ * when it is copied, so they hold a blend of several weeks' typing; the CSV
+ * upload tabs and the AWD TO FBA pick list are what really went out. See
+ * readShipped().
  *
  * Every difference is either a bug in here or a rule nobody has written down
  * yet, and there is no way to tell which from the outside. So the report gives
@@ -1988,32 +2045,89 @@ function backtest(fileId) {
   var ss = SpreadsheetApp.openById(fileId);
 
   var input = readPlanningInput(ss, cfg);
+  var shipped = readShipped(ss, input, cfg);
   var actual = {
-    tacToAwd: readDecisionColumn(input.sheets.tacToAwd, input.tacToAwd,
-      cfg.COLS.TAC_TO_AWD),
-    awdToFba: readDecisionColumn(input.sheets.awdToFba, input.awdToFba,
-      cfg.COLS.AWD_TO_FBA),
-    tacToFba: readDecisionColumn(input.sheets.tacToFba, input.tacToFba,
-      cfg.COLS.TAC_TO_FBA),
+    tacToAwd: alignToRows(input.tacToAwd, shipped.tacToAwd),
+    awdToFba: alignToRows(input.awdToFba, shipped.awdToFba),
+    tacToFba: alignToRows(input.tacToFba, shipped.tacToFba),
   };
 
   var plan = planUsTransferOrders(input, cfg);
   var report = diffPlan(input, plan, actual, cfg);
+  report.shippedNote = shipped.note;
   writeBacktestReport(ss, report, cfg, ss.getName());
   return report;
 }
 
-/** The cases a human typed, per lane row. */
-function readDecisionColumn(sheet, rows, C) {
-  var out = [];
-  if (!sheet || !rows.length) return out;
-  var first = rows[0].rowIndex;
-  var span = rows[rows.length - 1].rowIndex - first + 1;
-  var vals = sheet.getRange(first, C.CASES_OUT + 1, span, 1).getValues();
-  rows.forEach(function (r) {
-    out.push(num(vals[r.rowIndex - first][0]));
+/**
+ * What actually shipped, which is *not* the lane decision columns.
+ *
+ * Those carry forward when the file is copied, so they hold a mix of last
+ * week's typing and this week's. The shipment is recorded elsewhere:
+ *
+ *   Tactical > AWD   CSV upload TACTICAL AWD
+ *   Tactical > FBA   CSV upload TACTICAL FBA
+ *   AWD > FBA        the AWD TO FBA tab
+ *
+ * and the CSV tabs carry a trandate. A tab that is empty, or dated to another
+ * day, means nothing went out on that lane that run — so it counts as zeros,
+ * not as missing data. Getting this wrong flatters the rules on the Tactical
+ * lanes and slanders them on AWD.
+ */
+function readShipped(ss, input, cfg) {
+  var date = plannerDate(ss.getName());
+  var notes = [];
+
+  var caseQty = {};
+  [input.tacToAwd, input.tacToFba, input.awdToFba].forEach(function (rows) {
+    rows.forEach(function (r) {
+      if (r.caseQty > 0 && !caseQty[normSku(r.sku)]) caseQty[normSku(r.sku)] = r.caseQty;
+    });
   });
-  return out;
+
+  function fromCsv(tabName, label) {
+    var sh = sheetByName(ss, tabName);
+    var out = {};
+    if (!sh) { notes.push(label + ': no tab'); return out; }
+    var rows = readBlock(sh, cfg.LAYOUT.CSV_HEADER_ROW + 1);
+    var used = 0;
+    var stale = 0;
+    rows.forEach(function (row) {
+      var sku = normSku(row[3]);
+      if (!sku) return;
+      if (!isSameDay(row[1], date)) { stale++; return; }
+      var q = caseQty[sku];
+      if (!(q > 0)) return;
+      out[sku] = (out[sku] || 0) + Math.round(num(row[4]) / q);
+      used++;
+    });
+    notes.push(label + ': ' + (used ? used + ' rows for this run' : 'nothing shipped')
+      + (stale ? ' (' + stale + ' from another run, ignored)' : ''));
+    return out;
+  }
+
+  var awd = {};
+  var awdSheet = sheetByName(ss, cfg.TABS.SUMMARY_AWD_FBA);
+  if (awdSheet) {
+    readBlock(awdSheet, cfg.LAYOUT.SUMMARY_HEADER_ROW + 1).forEach(function (row) {
+      var sku = normSku(row[0]);
+      if (sku) awd[sku] = (awd[sku] || 0) + num(row[3]);
+    });
+  }
+  notes.push('AWD > FBA: ' + Object.keys(awd).length + ' SKUs on the pick list');
+
+  return {
+    tacToAwd: fromCsv(cfg.TABS.CSV_TAC_AWD, 'Tactical > AWD'),
+    tacToFba: fromCsv(cfg.TABS.CSV_TAC_FBA, 'Tactical > FBA'),
+    awdToFba: awd,
+    note: (date ? 'shipment date ' + Utilities.formatDate(date, cfg.TIMEZONE, 'yyyy-MM-dd')
+      : 'file name is not a date — CSV rows cannot be dated') + '. ' + notes.join('; '),
+  };
+}
+
+/** SKU-keyed shipped cases, laid back out in lane row order. */
+function alignToRows(rows, bySku) {
+  return rows.map(function (r) { return bySku[normSku(r.sku)] || 0; });
 }
 
 function diffPlan(input, plan, actual, cfg) {
@@ -2068,13 +2182,17 @@ function writeBacktestReport(ss, report, cfg, title) {
   sh.clear();
 
   var head = [
-    ['Back-test — ' + title, '', '', '', '', ''],
+    ['Back-test — ' + title + ' (vs what shipped, not what was typed)',
+      '', '', '', '', ''],
     ['Run', Utilities.formatDate(new Date(), cfg.TIMEZONE, 'yyyy-MM-dd HH:mm z')],
     ['DSS used', 'Tac>AWD ' + dssFor(cfg, 'TAC_TO_AWD')
       + ', AWD>FBA ' + dssFor(cfg, 'AWD_TO_FBA')
       + ', Tac>FBA ' + dssFor(cfg, 'TAC_TO_FBA')],
+    ['Pass 2 trigger', cfg.RULES.PASS2_TRIGGER_DOI === null
+      ? 'always (spec)' : 'below ' + cfg.RULES.PASS2_TRIGGER_DOI + ' DOI'],
+    ['Compared against', report.shippedNote || 'what shipped'],
     ['', ''],
-    ['Lane', 'rows', 'same', 'differ', 'cases (typed)', 'cases (script)'],
+    ['Lane', 'rows', 'same', 'differ', 'cases shipped', 'cases (script)'],
   ];
   Object.keys(report.lanes).forEach(function (k) {
     var l = report.lanes[k];
@@ -2094,7 +2212,7 @@ function writeBacktestReport(ss, report, cfg, title) {
 
   sh.getRange(1, 1, rows.length, width).setValues(rows);
   sh.getRange(1, 1, 1, width).setFontWeight('bold').setBackground(cfg.COLOURS.HEADER);
-  sh.getRange(5, 1, 1, 6).setFontWeight('bold');
+  sh.getRange(labelRow(head, 'Lane'), 1, 1, 6).setFontWeight('bold');
   sh.getRange(head.length, 1, 1, width).setFontWeight('bold')
     .setBackground(cfg.COLOURS.HEADER);
   sh.setFrozenRows(head.length);

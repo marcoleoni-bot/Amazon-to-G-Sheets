@@ -232,6 +232,21 @@ var CONFIG = {
     /** Top-up target for B2B and Critical SKUs (§5 pass 2, §7). */
     PRIORITY_DOI: 100,
 
+    /**
+     * How thin a B2B/Critical SKU must get before pass 2 tops it back up.
+     *
+     * §5 gives pass 2 no DOI trigger — the gate is "B2B or Critical", so a
+     * priority SKU is pushed to 100 DOI on every run, including one already
+     * sitting at 88. Across six back-tested runs that is the single largest
+     * source of over-shipping against what actually left AWD.
+     *
+     * null keeps the spec's behaviour, which is the default because the spec
+     * is what was signed off. Set it to a number (60 is the obvious candidate)
+     * to fire pass 2 only once cover has dropped below it. See the README —
+     * this is the open question with the most volume behind it.
+     */
+    PASS2_TRIGGER_DOI: null,
+
     /** Pass 1: reserved-blocked. */
     PASS1_RESERVED_RATIO: 0.5,   // X = Reserved / Fulfillable must exceed this
     PASS1_AVAILABLE_DOI: 42,     // Y = available-only DOI must be under this
@@ -330,6 +345,7 @@ var CONFIG_OVERRIDABLE = [
   'RULES.DSS_BY_LANE.AWD_TO_FBA',
   'RULES.DSS_BY_LANE.TAC_TO_FBA',
   'RULES.PRIORITY_DOI',
+  'RULES.PASS2_TRIGGER_DOI',
   'RULES.PASS1_RESERVED_RATIO',
   'RULES.PASS1_AVAILABLE_DOI',
   'RULES.PASS1_DOI_CAP',

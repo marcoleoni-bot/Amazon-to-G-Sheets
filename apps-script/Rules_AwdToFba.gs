@@ -34,6 +34,10 @@ function planAwdToFba(rows, cfg, ltfIndex) {
     if (out[i]) return;
     if (!hasRate(r)) return;
     if (!(r.b2b || r.critical)) return;
+    // A priority SKU that is still comfortable does not need topping up; see
+    // PASS2_TRIGGER_DOI. null means the spec's behaviour — always.
+    if (R.PASS2_TRIGGER_DOI !== null && R.PASS2_TRIGGER_DOI !== undefined
+        && r.amzDoi >= R.PASS2_TRIGGER_DOI) return;
     out[i] = pass2(r, R, remaining);
   });
 
