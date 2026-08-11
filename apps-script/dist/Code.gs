@@ -2103,6 +2103,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Dry run (report only, writes nothing)', 'dryRun')
     .addItem('Back-test this file against its own numbers', 'backtestThisFile')
+    .addItem('Back-test another planner…', 'backtestPrompt')
     .addSeparator()
     .addItem('Show settings', 'showSettings')
     .addToUi();
