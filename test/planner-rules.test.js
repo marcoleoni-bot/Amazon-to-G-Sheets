@@ -471,6 +471,82 @@ test('a lane DSS override changes the target without touching the rules', () => 
   assert.ok(G.planAwdToFba([row], at60, {})[0].cases > 0, 'at 60 it still wants stock');
 });
 
+// ------------------------------------------------------- the Tactical floor
+
+/** vm-realm objects have a different Object.prototype; compare structure. */
+const plain = (o) => JSON.parse(JSON.stringify(o));
+
+/** Just enough SpreadsheetApp to exercise the min-units read. */
+function stubSheets(rows, tabName = 'B2B') {
+  const sheet = {
+    getName: () => tabName,
+    getLastRow: () => rows.length,
+    getLastColumn: () => Math.max(...rows.map((r) => r.length), 1),
+    getRange: (row, col, numRows, numCols) => ({
+      getValues: () => rows.slice(row - 1, row - 1 + numRows)
+        .map((r) => Array.from({ length: numCols }, (_, i) => r[col - 1 + i] ?? '')),
+    }),
+  };
+  const ss = { getName: () => '(Old)_Inventory Monitoring Sheets', getSheets: () => [sheet] };
+  G.SpreadsheetApp = { openById: () => ss };
+  return () => { delete G.SpreadsheetApp; };
+}
+
+test('the Tactical floor is read from B2B!A:E, column E, exact match', () => {
+  // Mirrors the planner's own formula:
+  //   =VLOOKUP(C9, IMPORTRANGE(..., "B2B!A:E"), 5, 0)
+  const restore = stubSheets([
+    ['101-2040', 'x', 'y', 'z', 300],
+    ['101-2047', 'x', 'y', 'z', 120],
+    ['101-2003', 'x', 'y', 'z', 100],
+  ]);
+  try {
+    const got = G.readMinUnits(cfg());
+    assert.deepEqual(plain(got.bySku), { '101-2040': 300, '101-2047': 120, '101-2003': 100 });
+    assert.equal(got.count, 3);
+    assert.match(got.source, /B2B — 3 floors/);
+  } finally { restore(); }
+});
+
+test('a tab with no header row does not lose its first SKU', () => {
+  // VLOOKUP over A:E neither knows nor cares about headers, so nor may this.
+  const restore = stubSheets([['101-2040', '', '', '', 300]]);
+  try {
+    assert.deepEqual(plain(G.readMinUnits(cfg()).bySku), { '101-2040': 300 });
+  } finally { restore(); }
+});
+
+test('a labelled header row is skipped rather than read as a SKU', () => {
+  const c = cfg();
+  const restore = stubSheets([
+    ['SKU', '', '', '', 'min. units at Tactical'],
+    ['101-2040', '', '', '', 300],
+  ]);
+  try {
+    const got = G.readMinUnits(c);
+    assert.deepEqual(plain(got.bySku), { '101-2040': 300 });
+  } finally { restore(); }
+});
+
+test('an unreadable floor falls back to the planner, and says so', () => {
+  G.SpreadsheetApp = { openById: () => { throw new Error('no access'); } };
+  try {
+    const got = G.readMinUnits(cfg());
+    assert.deepEqual(plain(got.bySku), {});
+    assert.match(got.source, /planner column B \(direct read failed: no access\)/);
+  } finally { delete G.SpreadsheetApp; }
+});
+
+test('listing on the B2B tab only implies B2B when that is switched on', () => {
+  const restore = stubSheets([['101-2040', '', '', '', 300]]);
+  try {
+    assert.deepEqual(plain(G.readMinUnits(cfg()).b2bSkus), {}, 'off by default');
+    const on = cfg();
+    on.MIN_UNITS.TREAT_AS_B2B = true;
+    assert.deepEqual(plain(G.readMinUnits(on).b2bSkus), { '101-2040': true });
+  } finally { restore(); }
+});
+
 // -------------------------------------------------------------- end to end
 
 test('the full pipeline runs the lanes in dependency order', () => {

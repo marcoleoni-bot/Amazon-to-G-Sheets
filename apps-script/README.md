@@ -76,7 +76,7 @@ the same way Apps Script concatenates them, so the tests exercise shipped code
 rather than a Node-flavoured copy of it.
 
 ```bash
-npm test                                  # 35 rule tests, no network
+npm test                                  # 41 rule tests, no network
 node --test test/planner-rules.test.js
 ```
 
@@ -153,10 +153,33 @@ nobody has written down, and they cluster:
 
 Rebuild `08-04-26`, `06-29-26` and `06-22-26` the same way before going live.
 
+## The Tactical floor
+
+Read straight from the min-units workbook (§2), confirmed against the formula
+in the planner's own column B:
+
+```
+=VLOOKUP(C9, IMPORTRANGE(".../14fW_-Gacy...", "B2B!A:E"), 5, 0)
+```
+
+Tab `B2B`, SKU in column A, floor in column E, exact match. The reader mirrors
+VLOOKUP rather than assuming a header: row 1 is skipped only when it really
+does carry both header labels, so a tab without one does not quietly lose its
+first SKU. If the workbook cannot be opened it falls back to the planner's
+column B and the run header says so, with the floor count either way.
+
+Worth noticing what the tab's *name* implies: only B2B products carry a floor,
+which is why column B is blank for everything else in the planner. That also
+means the B2B list and the floor are the same read. Membership is not used as
+a B2B flag by default (`MIN_UNITS.TREAT_AS_B2B`) — column A of each lane
+already carries it and back-tests clean, and a false B2B flag silently moves a
+SKU to the 100 DOI target. Turn it on once someone confirms that tab holds B2B
+SKUs and nothing else.
+
 ## What needs a decision
 
-Four things are genuinely undecided. All four are config constants, so settling
-them is a value change, not an edit.
+Three things are genuinely undecided. All three are config constants, so
+settling them is a value change, not an edit.
 
 1. **The pallet-fill ceiling** (§12, explicitly left open).
    `PALLET_FILL_MAX_AWD_DOI` defaults to 100 and
@@ -164,21 +187,14 @@ them is a value change, not an edit.
    eligible SKUs the second one caps the fill at 4 cases, and the run header
    reports the shortfall rather than shipping an under-full pallet.
 
-2. **The Tactical floor source.** §2 says read `min. units at Tactical` from
-   `14fW_-Gacy…` directly rather than through the planner's IMPORTRANGE. That
-   workbook's tab layout could not be confirmed, so `MIN_UNITS.TAB` ships
-   blank and the reader falls back to the planner's own column B — the same
-   number by a longer route. The run header says which was used. Set
-   `MIN_UNITS.TAB` and the direct read takes over; no code change.
-
-3. **§7's quantity, which is stated twice and not identically.** "The smaller
+2. **§7's quantity, which is stated twice and not identically.** "The smaller
    of (a) 1 case and (b) cases to reach the target" is a minimum; "1 case,
    unless more is needed to reach the target" is a maximum. The worked example
    is 4 cases, and Marco's real `101-2040` row is 4 cases where 4 were
    available, so the second reading is the default (`TAC_TO_FBA_QTY_MODE:
    'to_target'`). `'single_case'` gives the first.
 
-4. **The Tactical → FBA spike ceiling.** §7 gate 4 says the resulting FBA DOI
+3. **The Tactical → FBA spike ceiling.** §7 gate 4 says the resulting FBA DOI
    must not spike but gives no number. Pass 1 is the only worked example of how
    far an indivisible case may overshoot — 100 to 110 — so that 1.1 ratio is
    reused (`TAC_TO_FBA_SPIKE_MULTIPLIER`).

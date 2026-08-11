@@ -62,18 +62,36 @@ var CONFIG = {
    * The per-SKU Tactical floor, read straight from MIN_UNITS_ID rather than
    * through the planner's IMPORTRANGE (§2).
    *
-   * `TAB` is blank until the tab is confirmed. While it is blank the reader
-   * falls back to the floor already sitting in the planner's own column B and
-   * says so in the run header, rather than silently treating the floor as zero.
+   * Confirmed from the formula in the planner's own column B:
+   *
+   *   =VLOOKUP(C9, IMPORTRANGE("...14fW_-Gacy...", "B2B!A:E"), 5, 0)
+   *
+   * So: tab `B2B`, SKU in column A, floor in column E, exact match. Note what
+   * that tab being named B2B implies — only B2B products carry a floor, which
+   * matches the planner, where column B is blank for everything else.
+   *
+   * If the read fails the reader falls back to the planner's column B and says
+   * so in the run header, rather than treating a missing floor as zero.
    */
   MIN_UNITS: {
-    TAB: '',
-    HEADER_ROW: 1,
+    TAB: 'B2B',
+    /** Column letters, used when the header text below is not matched. */
+    SKU_COL: 0,   // A
+    UNITS_COL: 4, // E
+    /** Optional: if both are found in row 1, that row is treated as a header. */
     SKU_HEADER: 'SKU',
     UNITS_HEADER: 'min. units at Tactical',
-    /** Used only if the headers above are not found on the tab. */
-    SKU_COL: 0,
-    UNITS_COL: 0,
+
+    /**
+     * Whether being listed on that tab counts as a B2B flag.
+     *
+     * Off by default. Column A of each lane is already the authoritative B2B
+     * flag and back-tests clean, so inferring it a second way can only add
+     * false positives — and a false B2B flag silently moves a SKU to the 100
+     * DOI target. Turn this on once someone confirms the tab holds B2B SKUs
+     * and nothing else.
+     */
+    TREAT_AS_B2B: false,
   },
 
   // ------------------------------------------------------------------- tabs
@@ -94,8 +112,9 @@ var CONFIG = {
 
     LTF: 'LTF',
     CRITICAL: 'CRITICAL',
-    B2B: 'B2B',
     PRODUCTS: 'Copy of Sheet1',
+    // The B2B tab is not here: it lives in the min-units workbook, and is the
+    // same tab the Tactical floor comes from. See MIN_UNITS.TAB.
 
     RUN_HEADER: 'Run header',
   },
@@ -1348,26 +1367,6 @@ function readCritical(ss, cfg) {
   return out;
 }
 
-/**
- * B2B SKUs. Column A of each lane already carries this, but when a B2B tab is
- * present it is the source it was derived from, so both are honoured.
- */
-function readB2b(planner, ims, cfg) {
-  var out = {};
-  [planner, ims].forEach(function (ss) {
-    if (!ss) return;
-    var sh = sheetByName(ss, cfg.TABS.B2B);
-    if (!sh) return;
-    readBlock(sh, 1).forEach(function (row) {
-      for (var c = 0; c < row.length; c++) {
-        var v = String(row[c] || '').trim();
-        if (/^[0-9]{3}-[0-9]{4}/.test(v)) { out[normSku(v)] = true; break; }
-      }
-    });
-  });
-  return out;
-}
-
 /** name -> { amazonSku, caseQty, discontinued } from `Copy of Sheet1`. */
 function readProducts(ss, cfg) {
   var sh = sheetByName(ss, cfg.TABS.PRODUCTS);
@@ -1395,34 +1394,51 @@ function readProducts(ss, cfg) {
  */
 function readMinUnits(cfg) {
   var conf = cfg.MIN_UNITS;
-  if (!conf.TAB) {
-    return { bySku: {}, source: 'planner column B (MIN_UNITS.TAB not set)' };
-  }
+  var missing = function (why) {
+    return { bySku: {}, b2bSkus: {}, count: 0, source: 'planner column B (' + why + ')' };
+  };
+  if (!conf.TAB) return missing('MIN_UNITS.TAB not set');
+
   try {
     var ss = SpreadsheetApp.openById(cfg.SOURCES.MIN_UNITS_ID);
     var sh = requireSheet(ss, conf.TAB, 'minimum units');
-    var all = readBlock(sh, conf.HEADER_ROW);
+    var all = readBlock(sh, 1);
     if (!all.length) throw new Error('tab is empty');
 
+    // The planner reaches this data with VLOOKUP over A:E, which neither knows
+    // nor cares whether row 1 is a header. Match that: only skip the first row
+    // when it really does carry both header labels, so a tab with no header
+    // does not quietly lose its first SKU.
     var header = all[0].map(function (h) {
       return String(h || '').trim().toLowerCase();
     });
     var skuCol = header.indexOf(String(conf.SKU_HEADER).toLowerCase());
     var unitsCol = header.indexOf(String(conf.UNITS_HEADER).toLowerCase());
-    if (skuCol === -1) skuCol = conf.SKU_COL;
-    if (unitsCol === -1) unitsCol = conf.UNITS_COL;
+    var labelled = skuCol !== -1 && unitsCol !== -1;
+    if (!labelled) {
+      skuCol = conf.SKU_COL;
+      unitsCol = conf.UNITS_COL;
+    }
 
     var bySku = {};
-    all.slice(1).forEach(function (row) {
+    var b2bSkus = {};
+    var count = 0;
+    (labelled ? all.slice(1) : all).forEach(function (row) {
       var sku = normSku(row[skuCol]);
-      if (sku) bySku[sku] = num(row[unitsCol]);
+      if (!sku) return;
+      bySku[sku] = num(row[unitsCol]);
+      b2bSkus[sku] = true;
+      if (bySku[sku] > 0) count++;
     });
-    return { bySku: bySku, source: ss.getName() + ' / ' + sh.getName() };
-  } catch (e) {
+
     return {
-      bySku: {},
-      source: 'planner column B (direct read failed: ' + e.message + ')',
+      bySku: bySku,
+      b2bSkus: conf.TREAT_AS_B2B ? b2bSkus : {},
+      count: count,
+      source: ss.getName() + ' / ' + sh.getName() + ' — ' + count + ' floors',
     };
+  } catch (e) {
+    return missing('direct read failed: ' + e.message);
   }
 }
 
@@ -1485,10 +1501,13 @@ function readPlanningInput(planner, cfg) {
     [tabs.TAC_TO_AWD, tabs.AWD_TO_FBA, tabs.TAC_TO_FBA], 120);
 
   var critical = readCritical(planner, cfg);
-  var b2bTab = readB2b(planner, ims, cfg);
   var ltfIndex = readLtf(planner, cfg);
   var products = readProducts(planner, cfg);
+
+  // The B2B tab and the Tactical floor are the same tab: the planner's column
+  // B is VLOOKUP(name, 'B2B'!A:E, 5). One read serves both.
   var minUnits = readMinUnits(cfg);
+  var b2bTab = minUnits.b2bSkus;
 
   function caseQtyFor(sku, cellValue) {
     var q = num(cellValue);

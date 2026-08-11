@@ -49,18 +49,36 @@ var CONFIG = {
    * The per-SKU Tactical floor, read straight from MIN_UNITS_ID rather than
    * through the planner's IMPORTRANGE (§2).
    *
-   * `TAB` is blank until the tab is confirmed. While it is blank the reader
-   * falls back to the floor already sitting in the planner's own column B and
-   * says so in the run header, rather than silently treating the floor as zero.
+   * Confirmed from the formula in the planner's own column B:
+   *
+   *   =VLOOKUP(C9, IMPORTRANGE("...14fW_-Gacy...", "B2B!A:E"), 5, 0)
+   *
+   * So: tab `B2B`, SKU in column A, floor in column E, exact match. Note what
+   * that tab being named B2B implies — only B2B products carry a floor, which
+   * matches the planner, where column B is blank for everything else.
+   *
+   * If the read fails the reader falls back to the planner's column B and says
+   * so in the run header, rather than treating a missing floor as zero.
    */
   MIN_UNITS: {
-    TAB: '',
-    HEADER_ROW: 1,
+    TAB: 'B2B',
+    /** Column letters, used when the header text below is not matched. */
+    SKU_COL: 0,   // A
+    UNITS_COL: 4, // E
+    /** Optional: if both are found in row 1, that row is treated as a header. */
     SKU_HEADER: 'SKU',
     UNITS_HEADER: 'min. units at Tactical',
-    /** Used only if the headers above are not found on the tab. */
-    SKU_COL: 0,
-    UNITS_COL: 0,
+
+    /**
+     * Whether being listed on that tab counts as a B2B flag.
+     *
+     * Off by default. Column A of each lane is already the authoritative B2B
+     * flag and back-tests clean, so inferring it a second way can only add
+     * false positives — and a false B2B flag silently moves a SKU to the 100
+     * DOI target. Turn this on once someone confirms the tab holds B2B SKUs
+     * and nothing else.
+     */
+    TREAT_AS_B2B: false,
   },
 
   // ------------------------------------------------------------------- tabs
@@ -81,8 +99,9 @@ var CONFIG = {
 
     LTF: 'LTF',
     CRITICAL: 'CRITICAL',
-    B2B: 'B2B',
     PRODUCTS: 'Copy of Sheet1',
+    // The B2B tab is not here: it lives in the min-units workbook, and is the
+    // same tab the Tactical floor comes from. See MIN_UNITS.TAB.
 
     RUN_HEADER: 'Run header',
   },
