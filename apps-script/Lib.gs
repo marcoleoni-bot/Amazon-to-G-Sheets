@@ -35,6 +35,31 @@ function bool(v) {
   return s === 'TRUE' || s === 'YES' || s === 'Y' || s === 'T' || s === '1';
 }
 
+/**
+ * What kind of sheet this is.
+ *
+ * A Connected Sheet — one backed by BigQuery or another data source — refuses
+ * most of the Range API with "The action is not supported for DATASOURCE
+ * sheet." Reading a header off one, or scanning it for formulas, throws rather
+ * than returning nothing, so anything that walks every tab in a workbook has
+ * to know the difference. Assumes an ordinary grid when the runtime cannot
+ * say, which is the safe direction: the caller's own try/catch still holds.
+ */
+function sheetKind(sh) {
+  try {
+    var t = sh.getType();
+    if (t === SpreadsheetApp.SheetType.DATASOURCE) return 'DATASOURCE';
+    if (t === SpreadsheetApp.SheetType.OBJECT) return 'OBJECT';
+    return 'GRID';
+  } catch (e) {
+    return 'GRID';
+  }
+}
+
+function isGridSheet(sh) {
+  return sheetKind(sh) === 'GRID';
+}
+
 /** SKUs are compared case-insensitively with surrounding space ignored. */
 function normSku(v) {
   return String(v === null || v === undefined ? '' : v).trim().toUpperCase();

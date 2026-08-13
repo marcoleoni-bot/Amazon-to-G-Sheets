@@ -63,6 +63,8 @@ function donorIds(ss, cfg) {
   (cfg.SOURCES.EXTRA_IMPORT_SOURCES || []).forEach(add);
 
   ss.getSheets().forEach(function (sh) {
+    // getFormulas() on a Connected Sheet throws; it holds no IMPORTRANGE anyway.
+    if (!isGridSheet(sh)) return;
     if (sh.getLastRow() < 1 || sh.getLastColumn() < 1) return;
     var formulas;
     try {

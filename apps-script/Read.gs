@@ -52,7 +52,7 @@ function waitForFormulas(ss, tabNames, timeoutSeconds) {
     var loading = false;
     for (var i = 0; i < tabNames.length && !loading; i++) {
       var sh = sheetByName(ss, tabNames[i]);
-      if (!sh) continue;
+      if (!sh || !isGridSheet(sh)) continue;
       var vals = readBlock(sh, 1);
       for (var r = 0; r < vals.length && !loading; r++) {
         for (var c = 0; c < vals[r].length; c++) {

@@ -616,6 +616,31 @@ function bool(v) {
   return s === 'TRUE' || s === 'YES' || s === 'Y' || s === 'T' || s === '1';
 }
 
+/**
+ * What kind of sheet this is.
+ *
+ * A Connected Sheet — one backed by BigQuery or another data source — refuses
+ * most of the Range API with "The action is not supported for DATASOURCE
+ * sheet." Reading a header off one, or scanning it for formulas, throws rather
+ * than returning nothing, so anything that walks every tab in a workbook has
+ * to know the difference. Assumes an ordinary grid when the runtime cannot
+ * say, which is the safe direction: the caller's own try/catch still holds.
+ */
+function sheetKind(sh) {
+  try {
+    var t = sh.getType();
+    if (t === SpreadsheetApp.SheetType.DATASOURCE) return 'DATASOURCE';
+    if (t === SpreadsheetApp.SheetType.OBJECT) return 'OBJECT';
+    return 'GRID';
+  } catch (e) {
+    return 'GRID';
+  }
+}
+
+function isGridSheet(sh) {
+  return sheetKind(sh) === 'GRID';
+}
+
 /** SKUs are compared case-insensitively with surrounding space ignored. */
 function normSku(v) {
   return String(v === null || v === undefined ? '' : v).trim().toUpperCase();
@@ -1764,7 +1789,7 @@ function waitForFormulas(ss, tabNames, timeoutSeconds) {
     var loading = false;
     for (var i = 0; i < tabNames.length && !loading; i++) {
       var sh = sheetByName(ss, tabNames[i]);
-      if (!sh) continue;
+      if (!sh || !isGridSheet(sh)) continue;
       var vals = readBlock(sh, 1);
       for (var r = 0; r < vals.length && !loading; r++) {
         for (var c = 0; c < vals[r].length; c++) {
@@ -2794,6 +2819,8 @@ function donorIds(ss, cfg) {
   (cfg.SOURCES.EXTRA_IMPORT_SOURCES || []).forEach(add);
 
   ss.getSheets().forEach(function (sh) {
+    // getFormulas() on a Connected Sheet throws; it holds no IMPORTRANGE anyway.
+    if (!isGridSheet(sh)) return;
     if (sh.getLastRow() < 1 || sh.getLastColumn() < 1) return;
     var formulas;
     try {
@@ -2884,9 +2911,17 @@ function findImsLaneTab(ims, plannerSheet, configuredName, cfg) {
 
   var best = null;
   ims.getSheets().forEach(function (sh) {
+    // A Connected Sheet throws rather than returning a header, so it can never
+    // be a source and must not be probed.
+    if (!isGridSheet(sh)) return;
     if (sh.getLastRow() < headerRow || sh.getLastColumn() < 1) return;
-    var got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
-      .getValues()[0].map(headerKey);
+    var got;
+    try {
+      got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
+        .getValues()[0].map(headerKey);
+    } catch (e) {
+      return; // unreadable for any other reason — not a candidate
+    }
     var hits = 0;
     want.forEach(function (h) { if (got.indexOf(h) !== -1) hits++; });
     var score = hits / want.length;
@@ -2920,9 +2955,18 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var plannerSheet = sheetByName(planner, tabName);
   if (!plannerSheet) return { lane: tabName, ok: false, note: 'no such tab in the planner' };
 
+  if (!isGridSheet(plannerSheet)) {
+    return { lane: tabName, ok: false,
+      note: 'the planner tab is a Connected Sheet — the script cannot write to it' };
+  }
+
   var found = findImsLaneTab(ims, plannerSheet,
     cfg.SOURCES.IMS_LANE_TABS[laneKey], cfg);
   if (!found.sheet) return { lane: tabName, ok: false, note: found.how };
+  if (!isGridSheet(found.sheet)) {
+    return { lane: tabName, ok: false, note: '"' + found.sheet.getName()
+      + '" is a Connected Sheet — copy it to an ordinary tab first' };
+  }
 
   var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
   var firstRow = cfg.LAYOUT.LANE_FIRST_DATA_ROW;

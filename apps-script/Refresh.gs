@@ -39,9 +39,17 @@ function findImsLaneTab(ims, plannerSheet, configuredName, cfg) {
 
   var best = null;
   ims.getSheets().forEach(function (sh) {
+    // A Connected Sheet throws rather than returning a header, so it can never
+    // be a source and must not be probed.
+    if (!isGridSheet(sh)) return;
     if (sh.getLastRow() < headerRow || sh.getLastColumn() < 1) return;
-    var got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
-      .getValues()[0].map(headerKey);
+    var got;
+    try {
+      got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
+        .getValues()[0].map(headerKey);
+    } catch (e) {
+      return; // unreadable for any other reason — not a candidate
+    }
     var hits = 0;
     want.forEach(function (h) { if (got.indexOf(h) !== -1) hits++; });
     var score = hits / want.length;
@@ -75,9 +83,18 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var plannerSheet = sheetByName(planner, tabName);
   if (!plannerSheet) return { lane: tabName, ok: false, note: 'no such tab in the planner' };
 
+  if (!isGridSheet(plannerSheet)) {
+    return { lane: tabName, ok: false,
+      note: 'the planner tab is a Connected Sheet — the script cannot write to it' };
+  }
+
   var found = findImsLaneTab(ims, plannerSheet,
     cfg.SOURCES.IMS_LANE_TABS[laneKey], cfg);
   if (!found.sheet) return { lane: tabName, ok: false, note: found.how };
+  if (!isGridSheet(found.sheet)) {
+    return { lane: tabName, ok: false, note: '"' + found.sheet.getName()
+      + '" is a Connected Sheet — copy it to an ordinary tab first' };
+  }
 
   var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
   var firstRow = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
