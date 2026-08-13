@@ -10,39 +10,46 @@
  */
 
 function planTacToAwd(rows, cfg, ltfIndex) {
-  var dss = dssFor(cfg, 'TAC_TO_AWD');
   var R = cfg.RULES;
+  var target = R.TAC_TO_AWD_TARGET_DOI;
 
   var out = rows.map(function (r) {
     if (isDiscontinued(r)) {
-      return decision(0, 'discontinued', { pass: 'NONE' });
+      return decision(0, 'discontinued — never Tactical > AWD', { pass: 'NONE' });
     }
     if (!(r.rate > 0)) {
       return decision(0, 'no order_plan_rate', { pass: 'NONE' });
     }
-
-    var want = clampMin0(
-      dssLadder(dss, r.wrDoi, r.awdDoi, r.availableCases, r.rate, r.caseQty));
-
-    if (want === 0) {
-      return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI',
-        { pass: 'PASS_3' });
+    if (r.caseQty <= 0) {
+      return decision(0, 'no case size', { pass: 'NONE' });
+    }
+    if (r.availableCases <= 0) {
+      return decision(0, 'no stock at Tactical', { pass: 'NONE' });
     }
 
-    var rule = (r.wrDoi + r.awdDoi < dss)
-      ? 'Tactical + AWD under ' + dss + ' DOI, sending all available'
-      : 'baseline ' + dss + ' DOI';
+    // The entry filter: short at BOTH ends. Thin at AWD while FBA is
+    // comfortable is not a reason to move a pallet — FBA is what AWD feeds,
+    // and it can wait for a run where something is genuinely at risk.
+    if (!(r.awdDoi < R.TAC_TO_AWD_GATE_AWD_DOI)) {
+      return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI', { pass: 'NONE' });
+    }
+    if (r.fbaDoi !== null && r.fbaDoi !== undefined
+        && !(r.fbaDoi < R.TAC_TO_AWD_GATE_FBA_DOI)) {
+      return decision(0, 'no need — FBA healthy at ' + fmt(r.fbaDoi) + ' DOI',
+        { pass: 'NONE' });
+    }
 
-    var d = decision(want, rule, { pass: 'PASS_3' });
+    var want = clampMin0(roundUp((target - r.awdDoi) * r.rate / r.caseQty));
+    if (want === 0) {
+      return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI (target '
+        + target + ')', { pass: 'NONE' });
+    }
 
-    // Stock cap. The floor is a separate, later constraint.
+    var d = decision(want, 'top-up AWD to ' + target + ' DOI', { pass: 'PASS_3' });
+
     if (d.cases > r.availableCases) {
       d.cases = clampMin0(r.availableCases);
-      addNote(d, 'capped by Tactical stock');
-      addFlag(d, 'NEEDS_REVIEW');
-    }
-    if (d.cases > R.REVIEW_ABOVE_CASES) {
-      addNote(d, 'over ' + R.REVIEW_ABOVE_CASES + ' cases');
+      addNote(d, 'capped by Tactical stock (' + r.availableCases + ' cases)');
       addFlag(d, 'NEEDS_REVIEW');
     }
     return d;
@@ -67,84 +74,50 @@ function isDiscontinued(r) {
  * Returns { urgent, reasons, thinnest } — `reasons` names the SKUs that
  * justify the run, so the verdict can say why rather than just yes or no.
  */
-function assessUrgency(rows, decisions, cfg) {
-  var R = cfg.RULES;
-  var urgent = [];
-  var thinnest = null;
-
-  rows.forEach(function (r, i) {
-    if (isDiscontinued(r) || !(r.rate > 0)) return;
-    if (!decisions[i] || decisions[i].cases <= 0) return;
-
-    if (thinnest === null || r.awdDoi < thinnest.awdDoi) thinnest = r;
-
-    // Both, not either. AWD is a buffer in front of FBA, so an empty buffer
-    // only matters when FBA is close enough to needing it.
-    var thin = r.awdDoi < R.TAC_TO_AWD_URGENCY_AWD_DOI;
-    var fbaCanHold = r.fbaDoi !== null && r.fbaDoi !== undefined
-      && r.fbaDoi >= R.TAC_TO_AWD_HEALTHY_FBA_DOI;
-
-    if (thin && !fbaCanHold) {
-      urgent.push({
-        sku: r.sku,
-        awdDoi: r.awdDoi,
-        fbaDoi: r.fbaDoi,
-        cases: decisions[i].cases,
-      });
-    }
-  });
-
-  urgent.sort(function (a, b) { return a.awdDoi - b.awdDoi; });
-  return { urgent: urgent, thinnest: thinnest };
-}
-
-/**
- * The lane's verdict: raise this transfer order, or hold it for a later run.
- *
- * Holding zeroes the lane rather than leaving numbers nobody intends to ship,
- * and every row that wanted stock says why it is being held instead.
- */
 function decideTacToAwdRun(rows, decisions, cfg) {
   var R = cfg.RULES;
   var demand = decisions.reduce(function (s, d) { return s + (d.cases > 0 ? d.cases : 0); }, 0);
-  var assessment = assessUrgency(rows, decisions, cfg);
+
+  var contributors = [];
+  rows.forEach(function (r, i) {
+    if (decisions[i].cases > 0) {
+      contributors.push({ sku: r.sku, cases: decisions[i].cases, awdDoi: r.awdDoi });
+    }
+  });
+  contributors.sort(function (a, b) { return a.awdDoi - b.awdDoi; });
 
   if (demand === 0) {
-    return {
-      raise: false, demandCases: 0, urgent: [],
-      why: 'nothing below the ' + dssFor(cfg, 'TAC_TO_AWD') + ' DOI target at AWD',
-    };
+    return { raise: false, demandCases: 0, why: 'nothing short at both AWD and FBA' };
   }
 
-  if (!assessment.urgent.length) {
-    var t = assessment.thinnest;
-    var why = 'nothing urgent — '
-      + (t ? 'thinnest is ' + t.sku + ' at ' + fmt(t.awdDoi) + ' DOI at AWD'
-        + (t.fbaDoi ? ', FBA on ' + fmt(t.fbaDoi) : '') : 'no SKU below '
-        + R.TAC_TO_AWD_URGENCY_AWD_DOI + ' DOI')
-      + '. ' + demand + ' cases of demand would need '
-      + clampMin0(R.PALLET_MIN_CASES - demand) + ' cases of filler to make a pallet';
+  // The pallet is the decider. Everything that qualifies is already genuinely
+  // short at both ends, so there is no filler to reach for — if the qualifying
+  // volume will not fill a pallet, the run waits for one where it does.
+  if (demand < R.PALLET_MIN_CASES) {
+    var why = 'only ' + demand + ' case' + (demand === 1 ? '' : 's')
+      + ' qualify, short of the ' + R.PALLET_MIN_CASES + '-case pallet'
+      + (contributors.length ? ' (thinnest ' + contributors[0].sku + ' at '
+        + fmt(contributors[0].awdDoi) + ' DOI at AWD)' : '')
+      + ' — wait for a run that fills one';
 
     rows.forEach(function (r, i) {
       if (decisions[i].cases <= 0) return;
       decisions[i] = decision(0, 'held for a later run', {
         pass: 'NONE',
-        notes: ['would have sent ' + decisions[i].cases + ' cases, AWD on '
-          + fmt(r.awdDoi) + ' DOI — not urgent'],
+        notes: ['would have sent ' + decisions[i].cases + ' cases; run totals '
+          + demand + ' of ' + R.PALLET_MIN_CASES],
       });
     });
-
-    return { raise: false, demandCases: demand, urgent: [], why: why, held: true };
+    return { raise: false, demandCases: demand, why: why, held: true };
   }
 
   return {
     raise: true,
     demandCases: demand,
-    urgent: assessment.urgent,
-    why: assessment.urgent.length + ' SKU' + (assessment.urgent.length === 1 ? '' : 's')
-      + ' running thin at AWD — ' + assessment.urgent.slice(0, 3).map(function (u) {
-        return u.sku + ' (' + fmt(u.awdDoi) + ' DOI)';
-      }).join(', ') + (assessment.urgent.length > 3 ? ' and others' : ''),
+    why: contributors.length + ' SKU' + (contributors.length === 1 ? '' : 's')
+      + ' short at both ends — ' + contributors.slice(0, 3).map(function (u) {
+        return u.sku + ' (' + fmt(u.awdDoi) + ' DOI at AWD)';
+      }).join(', ') + (contributors.length > 3 ? ' and others' : ''),
   };
 }
 

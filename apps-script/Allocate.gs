@@ -181,13 +181,17 @@ function planUsTransferOrders(input, cfg) {
   // 3 — Tactical > AWD demand
   var tacAwdDec = planTacToAwd(input.tacToAwd, cfg, ltf);
 
-  // 3b — is this run worth raising? Deciding before contention means a held
-  // run gives its Tactical stock back to the FBA lane instead of reserving it.
-  var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
-
   // 4 — one floor, two lanes
   var alloc = allocateTactical(input.tacToAwd, tacAwdDec,
     input.tacToFba, tacFbaDec, cfg);
+
+  // 4b — is this run worth raising?
+  //
+  // Asked *after* the floor, because the floor is most of the answer. Five of
+  // the twelve SKUs that qualified on 08-13 could not give up a single case
+  // without breaking their minimum at Tactical; counting them left 25 cases
+  // and a pallet, counting what could actually move left 13 and a wait.
+  var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
 
   // 5 — the pallet minimum applies to a run that is going, and only then
   var pallet = tacAwdVerdict.raise

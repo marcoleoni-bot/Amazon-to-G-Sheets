@@ -224,8 +224,21 @@ var CONFIG = {
   // -------------------------------------------------------------- rule dials
 
   RULES: {
-    /** Baseline days-of-inventory target, all lanes (§4). */
+    /** Baseline days-of-inventory target for ordinary SKUs. */
     DSS: 60,
+
+    /**
+     * Tactical > AWD, as actually worked by hand.
+     *
+     * The lane is not the generic ladder. It looks at SKUs that are short at
+     * BOTH ends — under 100 days at AWD *and* under 100 at FBA — and tops the
+     * AWD end to 75, not to the 60 baseline. A SKU thin at AWD but comfortable
+     * at FBA is not a reason to move a pallet; that is the same judgement the
+     * urgency gate makes, expressed as the entry filter.
+     */
+    TAC_TO_AWD_GATE_AWD_DOI: 100,
+    TAC_TO_AWD_GATE_FBA_DOI: 100,
+    TAC_TO_AWD_TARGET_DOI: 75,
 
     /**
      * Per-lane DSS override. Null means "use DSS".
@@ -254,16 +267,35 @@ var CONFIG = {
      * to fire pass 2 only once cover has dropped below it. See the README —
      * this is the open question with the most volume behind it.
      */
-    PASS2_TRIGGER_DOI: null,
+    PASS2_TRIGGER_DOI: 100,
 
-    /** Pass 1: reserved-blocked. */
-    PASS1_RESERVED_RATIO: 0.5,   // X = Reserved / Fulfillable must exceed this
-    PASS1_AVAILABLE_DOI: 42,     // Y = available-only DOI must be under this
-    PASS1_DOI_CAP: 100,          // cap A
-    PASS1_SINGLE_CASE_CAP: 110,  // cap B: one case may land up to here
+    /**
+     * Pass 1: reserved-blocked.
+     *
+     * Trigger and target are different numbers. A SKU qualifies when its
+     * available-only cover is under 40 days; the top-up then aims at 42. Using
+     * one number for both would keep re-triggering SKUs it had just filled.
+     */
+    PASS1_RESERVED_RATIO: 0.5,   // reserved / fulfillable must exceed this
+    PASS1_TRIGGER_DOI: 40,       // available-only cover under this qualifies
+    PASS1_AVAILABLE_DOI: 42,     // and the top-up aims here
+
+    /**
+     * The one ceiling every AWD > FBA pass respects: total FBA cover after the
+     * transfer. Cases come off until the result fits; if that leaves none, none
+     * are sent and the row is flagged rather than quietly dropped.
+     */
+    MAX_FBA_DOI_AFTER: 110,
 
     /** Pass 2: flag when the suggestion eats this share of AWD stock. */
     PASS2_LARGE_SHARE_OF_AWD: 0.5,
+
+    /**
+     * Pass 2 flags a priority SKU sitting under this before the transfer.
+     * Being that thin on a B2B or Critical line usually means the rate is
+     * inflated, and that is worth a second look before it ships.
+     */
+    PASS2_FLAG_BELOW_DOI: 70,
 
     /** Pass 3: propose it, but ask for a second look above this. */
     REVIEW_ABOVE_CASES: 7,
@@ -407,9 +439,12 @@ var CONFIG_OVERRIDABLE = [
   'RULES.PRIORITY_DOI',
   'RULES.PASS2_TRIGGER_DOI',
   'RULES.PASS1_RESERVED_RATIO',
+  'RULES.PASS1_TRIGGER_DOI',
   'RULES.PASS1_AVAILABLE_DOI',
-  'RULES.PASS1_DOI_CAP',
-  'RULES.PASS1_SINGLE_CASE_CAP',
+  'RULES.MAX_FBA_DOI_AFTER',
+  'RULES.TAC_TO_AWD_TARGET_DOI',
+  'RULES.TAC_TO_AWD_GATE_AWD_DOI',
+  'RULES.TAC_TO_AWD_GATE_FBA_DOI',
   'RULES.PASS2_LARGE_SHARE_OF_AWD',
   'RULES.REVIEW_ABOVE_CASES',
   'RULES.PALLET_MIN_CASES',

@@ -98,21 +98,22 @@ test('a healthy reserved ratio keeps a SKU out of pass 1', () => {
   assert.equal(d.cases, 16, 'Marco typed 16 on 08-10-26');
 });
 
-test('pass 1 cap B sends a single case up to 110 DOI and nothing above it', () => {
+test('pass 1 takes cases off until FBA cover fits under 110', () => {
   const c = cfg();
-  const base = {
-    rate: 1, amzFulfillable: 10, amzReserved: 40, availableCases: 50,
-    awdAvailableUnits: 1000, caseQty: 20,
-  };
-  // 95 + 20 = 115 units at rate 1 -> 115 DOI, past the 110 ceiling.
+  const base = { rate: 1, amzFulfillable: 10, amzReserved: 40, availableCases: 50,
+    awdAvailableUnits: 1000, caseQty: 20 };
+
+  // 95 + 20 = 115 DOI at rate 1: even one case overshoots, so none go — and
+  // the row is flagged rather than lost, because the stock really is there.
   const over = G.planAwdToFba([awdFbaRow({ ...base, amzTotal: 95 })], c, {})[0];
   assert.equal(over.cases, 0);
-  assert.match(over.rule, /would reach 115 DOI \(>110\)/);
+  assert.match(over.rule, /1 case reaches 115 DOI \(>110\)/);
+  assert.ok(over.flags.includes('RESERVED_BLOCKED'));
+  assert.ok(over.flags.includes('NEEDS_REVIEW'));
 
-  // 85 + 20 = 105 DOI, inside it, so the indivisible case goes.
+  // 85 + 20 = 105 DOI, inside the ceiling.
   const under = G.planAwdToFba([awdFbaRow({ ...base, amzTotal: 85 })], c, {})[0];
   assert.equal(under.cases, 1);
-  assert.match(under.notes.join(' '), /within 110/);
 });
 
 test('pass 2 holds B2B and Critical at 100 DOI, and stops at the shelf', () => {
@@ -227,89 +228,29 @@ test('discontinued SKUs never move to AWD', () => {
   const row = tacAwdRow({ lifecycle: 'Discontinued', awdDoi: 0, wrDoi: 1 });
   const [d] = G.planTacToAwd([row], cfg(), {});
   assert.equal(d.cases, 0);
-  assert.equal(d.rule, 'discontinued');
+  assert.match(d.rule, /discontinued/);
 });
 
-test('Tactical > AWD tops AWD up to the baseline', () => {
-  // 08-10-26 101-2106 at DSS 60.
-  const row = tacAwdRow({
-    sku: '101-2106', rate: 3.356666667, tacAvailableUnits: 180,
-    availableCases: 10, wrDoi: 53.58, awdQty: 126, awdDoi: 37.53723932,
-    caseQty: 18, fbaDoi: 68.2224429,
-  });
-  const [d] = G.planTacToAwd([row], cfg(), {});
-  assert.equal(d.cases, 5, 'the spec\'s 60 DOI target; Marco typed 10');
-});
-
-test('a comfortable SKU does not drag a pallet of filler along with it', () => {
-  // Marco's own case: one SKU on 40 days of AWD cover with FBA healthy behind
-  // it wants 5 cases. Filling to 25 would mean 20 cases of SKUs that needed
-  // nothing — more freight and more stock at AWD than doing nothing.
+test('Tactical > AWD tops AWD to 75, and only when FBA is short too', () => {
   const c = cfg();
-  const rows = [tacAwdRow({ sku: 'COMFY', awdDoi: 40, awdQty: 400, fbaDoi: 90,
-    wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
-  const dec = G.planTacToAwd(rows, c, {});
-  assert.ok(dec[0].cases > 0, 'the ladder still wants stock');
+  // Short at both ends: AWD 27, FBA 60. (75-27)*3.36/20 -> 9 cases.
+  const short = tacAwdRow({ sku: 'BOTH', rate: 3.36, awdDoi: 27, fbaDoi: 60,
+    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 });
+  assert.equal(G.planTacToAwd([short], c, {})[0].cases,
+    G.roundUp((75 - 27) * 3.36 / 20));
 
-  const verdict = G.decideTacToAwdRun(rows, dec, c);
-  assert.equal(verdict.raise, false);
-  assert.match(verdict.why, /nothing urgent/);
-  assert.match(verdict.why, /COMFY at 40 DOI/);
-  assert.equal(dec[0].cases, 0, 'the lane is zeroed, not left with numbers');
-  assert.match(G.reasonText(dec[0], 20), /held for a later run/);
-  assert.match(G.reasonText(dec[0], 20), /not urgent/);
+  // Marco's 08-13 case: 101-2112 is nearly empty at AWD but FBA has 120 days.
+  const healthyFba = tacAwdRow({ sku: '101-2112', rate: 0.91, awdDoi: 0,
+    fbaDoi: 119.7, caseQty: 8, availableCases: 10, tacAvailableUnits: 80 });
+  const [d] = G.planTacToAwd([healthyFba], c, {});
+  assert.equal(d.cases, 0);
+  assert.match(d.rule, /FBA healthy at 120 DOI/);
 });
 
-test('a thin SKU that FBA cannot cover justifies the run', () => {
-  const c = cfg();
-  const rows = [tacAwdRow({ sku: 'THIN', awdDoi: 20, awdQty: 200, fbaDoi: 25,
-    wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
-  const dec = G.planTacToAwd(rows, c, {});
-  const verdict = G.decideTacToAwdRun(rows, dec, c);
-  assert.equal(verdict.raise, true);
-  assert.match(verdict.why, /THIN \(20 DOI\)/);
-  assert.ok(dec[0].cases > 0);
-});
 
-test('an empty AWD shelf is not urgent when FBA is sitting on years of cover', () => {
-  // 101-2102, real: no AWD stock at all — 0 days of cover, which looks like
-  // the most urgent row in the book — while FBA holds 599 days and it sells a
-  // sixth of a unit a day. Reading AWD alone makes this SKU justify a pallet
-  // every week.
-  const c = cfg();
-  const rows = [tacAwdRow({ sku: '101-2102', rate: 0.16, awdDoi: 0, awdQty: 0,
-    fbaDoi: 599.1, wrDoi: 1875, caseQty: 50, availableCases: 6,
-    tacAvailableUnits: 300 })];
-  const dec = G.planTacToAwd(rows, c, {});
-  assert.ok(dec[0].cases > 0, 'the ladder still wants to top AWD up');
-  assert.equal(G.decideTacToAwdRun(rows, dec, c).raise, false,
-    'but it is the quietest SKU in the catalogue, not an emergency');
-});
 
-test('an empty AWD shelf IS urgent once FBA is thin too', () => {
-  const c = cfg();
-  const rows = [tacAwdRow({ sku: 'EMPTY', awdDoi: 0, awdQty: 0, fbaDoi: 25,
-    wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
-  const dec = G.planTacToAwd(rows, c, {});
-  assert.equal(G.decideTacToAwdRun(rows, dec, c).raise, true);
-});
 
-test('a held run is not padded to a pallet', () => {
-  const c = cfg();
-  const rows = [
-    tacAwdRow({ sku: 'COMFY', awdDoi: 40, awdQty: 400, fbaDoi: 90, wrDoi: 100,
-      caseQty: 20, availableCases: 40, tacAvailableUnits: 800 }),
-    tacAwdRow({ sku: 'SPARE', awdDoi: 70, awdQty: 700, fbaDoi: 90, wrDoi: 100,
-      caseQty: 20, availableCases: 40, tacAvailableUnits: 800 }),
-  ];
-  const input = { tacToAwd: rows, awdToFba: [], tacToFba: [], ltfIndex: {} };
-  const plan = G.planUsTransferOrders(input, c);
 
-  assert.equal(plan.totals.tacToAwdCases, 0, 'no cases at all, filler included');
-  assert.equal(plan.pallet.filledCases, 0);
-  assert.equal(plan.verdicts.tacToAwd.raise, false);
-  assert.match(plan.verdicts.tacToAwd.why, /nothing urgent/);
-});
 
 test('each lane says plainly whether to raise the order', () => {
   const c = cfg();
@@ -330,98 +271,39 @@ test('each lane says plainly whether to raise the order', () => {
   assert.match(v.tacToFba.why, /AWD is covering every shortfall/);
 });
 
-test('the pallet minimum tops a short run up from SKUs nearest to needing it', () => {
-  const c = cfg();
-  // 5 cases of genuine demand, so the run is short of the 25-case pallet.
-  const demand = tacAwdRow({ sku: 'NEEDS', awdDoi: 50, awdQty: 500, wrDoi: 100,
-    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 });
-  // Two candidates already above target; the lower DOI is served first.
-  const near = tacAwdRow({ sku: 'NEAR', awdDoi: 65, awdQty: 650, wrDoi: 100,
-    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 });
-  const far = tacAwdRow({ sku: 'FAR', awdDoi: 80, awdQty: 800, wrDoi: 100,
-    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 });
 
-  const rows = [demand, near, far];
-  const dec = G.planTacToAwd(rows, c, {});
-  assert.ok(dec[0].cases > 0 && dec[1].cases === 0 && dec[2].cases === 0);
 
-  const headroom = { NEEDS: 800, NEAR: 800, FAR: 800 };
-  const before = dec[0].cases;
-  const res = G.applyPalletFill(rows, dec, c, headroom, {});
 
-  assert.equal(dec[0].cases, before, 'demand rows are untouched by the fill');
-  assert.equal(dec[1].pass, 'PALLET_FILL');
-  assert.ok(dec[1].cases >= dec[2].cases, 'the nearer SKU is filled first');
-  assert.match(G.reasonText(dec[1], 20), /pallet fill, pulled forward/);
 
-  // Two SKUs at 2 cases each is all this pool can give, so the run stays short
-  // rather than pretending the pallet is full.
-  assert.equal(res.filledCases, 4);
-  assert.equal(res.shortfall, c.RULES.PALLET_MIN_CASES - before - 4);
-});
 
-test('a deep enough filler pool reaches the pallet minimum exactly', () => {
-  const c = cfg();
-  const rows = [tacAwdRow({ sku: 'NEEDS', awdDoi: 50, awdQty: 500, wrDoi: 100,
-    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 })];
-  const headroom = { NEEDS: 800 };
-  // Twelve candidates above target, none of which the ladder wants to send.
-  for (let i = 0; i < 12; i++) {
-    rows.push(tacAwdRow({ sku: `FILL${i}`, awdDoi: 62 + i, awdQty: 620 + i * 10,
-      wrDoi: 100, caseQty: 20, availableCases: 40, tacAvailableUnits: 800 }));
-    headroom[`FILL${i}`] = 800;
-  }
-
-  const dec = G.planTacToAwd(rows, c, {});
-  const before = dec[0].cases;
-  const res = G.applyPalletFill(rows, dec, c, headroom, {});
-
-  assert.equal(res.shortfall, 0);
-  assert.equal(before + res.filledCases, c.RULES.PALLET_MIN_CASES);
-  const total = dec.reduce((s, d) => s + d.cases, 0);
-  assert.equal(total, c.RULES.PALLET_MIN_CASES, 'the run ships a full pallet');
-  assert.match(G.palletStatus(res), /topped up to 25 cases/);
-});
-
-test('no demand means no pallet, rather than a pallet of pure filler', () => {
-  const c = cfg();
-  const rows = [tacAwdRow({ sku: 'FULL', awdDoi: 90, wrDoi: 100 })];
-  const dec = G.planTacToAwd(rows, c, {});
-  assert.equal(dec[0].cases, 0);
-  const res = G.applyPalletFill(rows, dec, c, { FULL: 800 }, {});
-  assert.equal(res.skipped, true);
-  assert.equal(res.filledCases, 0);
-});
-
-test('an exhausted filler pool is reported, not shipped short in silence', () => {
+test('a run that cannot fill a pallet waits for one that can', () => {
+  // 08-13 exactly: 101-2041 could take 3 cases and 101-2112 10, but 13 cases
+  // will not fill a 25-case pallet, so nothing goes and both rows say why.
   const c = cfg();
   const rows = [
-    tacAwdRow({ sku: 'NEEDS', awdDoi: 55, awdQty: 550, wrDoi: 100,
-      caseQty: 20, availableCases: 1, tacAvailableUnits: 20 }),
+    tacAwdRow({ sku: '101-2041', rate: 7.32, awdDoi: 34.8, fbaDoi: 90,
+      caseQty: 51, availableCases: 3, tacAvailableUnits: 153 }),
+    tacAwdRow({ sku: '101-2112', rate: 0.91, awdDoi: 0, fbaDoi: 40,
+      caseQty: 8, availableCases: 10, tacAvailableUnits: 80 }),
   ];
   const dec = G.planTacToAwd(rows, c, {});
-  const res = G.applyPalletFill(rows, dec, c, { NEEDS: 0 }, {});
-  assert.ok(res.shortfall > 0);
-  assert.match(G.palletStatus(res), /SHORT by \d+ cases/);
+  assert.ok(dec[0].cases + dec[1].cases > 0, 'both qualify on their own');
+
+  const verdict = G.decideTacToAwdRun(rows, dec, c);
+  assert.equal(verdict.raise, false);
+  assert.match(verdict.why, /short of the 25-case pallet/);
+  assert.equal(dec[0].cases, 0);
+  assert.equal(dec[1].cases, 0);
+  assert.match(G.reasonText(dec[1], 8), /held for a later run/);
 });
 
-test('the filler ceiling stops a case that would spike AWD cover', () => {
+test('enough qualifying volume does raise the run', () => {
   const c = cfg();
-  c.RULES.PALLET_FILL_MAX_AWD_DOI = 70;
-  const demand = tacAwdRow({ sku: 'NEEDS', awdDoi: 50, awdQty: 500, wrDoi: 100,
-    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 });
-  // 65 DOI now; one 20-unit case at rate 10 lands it on 67, still inside 70.
-  const ok = tacAwdRow({ sku: 'OK', awdDoi: 65, awdQty: 650, wrDoi: 100,
-    caseQty: 20, availableCases: 40, tacAvailableUnits: 800 });
-  // 65 DOI, but a 100-unit case lands it on 75.
-  const spike = tacAwdRow({ sku: 'SPIKE', awdDoi: 65, awdQty: 650, wrDoi: 100,
-    caseQty: 100, availableCases: 40, tacAvailableUnits: 800 });
-
-  const rows = [demand, ok, spike];
+  const rows = [tacAwdRow({ sku: 'BIG', rate: 30, awdDoi: 10, fbaDoi: 50,
+    caseQty: 20, availableCases: 200, tacAvailableUnits: 4000 })];
   const dec = G.planTacToAwd(rows, c, {});
-  G.applyPalletFill(rows, dec, c, { NEEDS: 800, OK: 800, SPIKE: 800 }, {});
-  assert.ok(dec[1].cases > 0, 'the case that stays under the ceiling goes');
-  assert.equal(dec[2].cases, 0, 'the one that spikes does not');
+  assert.ok(dec[0].cases >= c.RULES.PALLET_MIN_CASES);
+  assert.equal(G.decideTacToAwdRun(rows, dec, c).raise, true);
 });
 
 // ------------------------------------------------------------ Tactical > FBA

@@ -237,8 +237,21 @@ var CONFIG = {
   // -------------------------------------------------------------- rule dials
 
   RULES: {
-    /** Baseline days-of-inventory target, all lanes (§4). */
+    /** Baseline days-of-inventory target for ordinary SKUs. */
     DSS: 60,
+
+    /**
+     * Tactical > AWD, as actually worked by hand.
+     *
+     * The lane is not the generic ladder. It looks at SKUs that are short at
+     * BOTH ends — under 100 days at AWD *and* under 100 at FBA — and tops the
+     * AWD end to 75, not to the 60 baseline. A SKU thin at AWD but comfortable
+     * at FBA is not a reason to move a pallet; that is the same judgement the
+     * urgency gate makes, expressed as the entry filter.
+     */
+    TAC_TO_AWD_GATE_AWD_DOI: 100,
+    TAC_TO_AWD_GATE_FBA_DOI: 100,
+    TAC_TO_AWD_TARGET_DOI: 75,
 
     /**
      * Per-lane DSS override. Null means "use DSS".
@@ -267,16 +280,35 @@ var CONFIG = {
      * to fire pass 2 only once cover has dropped below it. See the README —
      * this is the open question with the most volume behind it.
      */
-    PASS2_TRIGGER_DOI: null,
+    PASS2_TRIGGER_DOI: 100,
 
-    /** Pass 1: reserved-blocked. */
-    PASS1_RESERVED_RATIO: 0.5,   // X = Reserved / Fulfillable must exceed this
-    PASS1_AVAILABLE_DOI: 42,     // Y = available-only DOI must be under this
-    PASS1_DOI_CAP: 100,          // cap A
-    PASS1_SINGLE_CASE_CAP: 110,  // cap B: one case may land up to here
+    /**
+     * Pass 1: reserved-blocked.
+     *
+     * Trigger and target are different numbers. A SKU qualifies when its
+     * available-only cover is under 40 days; the top-up then aims at 42. Using
+     * one number for both would keep re-triggering SKUs it had just filled.
+     */
+    PASS1_RESERVED_RATIO: 0.5,   // reserved / fulfillable must exceed this
+    PASS1_TRIGGER_DOI: 40,       // available-only cover under this qualifies
+    PASS1_AVAILABLE_DOI: 42,     // and the top-up aims here
+
+    /**
+     * The one ceiling every AWD > FBA pass respects: total FBA cover after the
+     * transfer. Cases come off until the result fits; if that leaves none, none
+     * are sent and the row is flagged rather than quietly dropped.
+     */
+    MAX_FBA_DOI_AFTER: 110,
 
     /** Pass 2: flag when the suggestion eats this share of AWD stock. */
     PASS2_LARGE_SHARE_OF_AWD: 0.5,
+
+    /**
+     * Pass 2 flags a priority SKU sitting under this before the transfer.
+     * Being that thin on a B2B or Critical line usually means the rate is
+     * inflated, and that is worth a second look before it ships.
+     */
+    PASS2_FLAG_BELOW_DOI: 70,
 
     /** Pass 3: propose it, but ask for a second look above this. */
     REVIEW_ABOVE_CASES: 7,
@@ -420,9 +452,12 @@ var CONFIG_OVERRIDABLE = [
   'RULES.PRIORITY_DOI',
   'RULES.PASS2_TRIGGER_DOI',
   'RULES.PASS1_RESERVED_RATIO',
+  'RULES.PASS1_TRIGGER_DOI',
   'RULES.PASS1_AVAILABLE_DOI',
-  'RULES.PASS1_DOI_CAP',
-  'RULES.PASS1_SINGLE_CASE_CAP',
+  'RULES.MAX_FBA_DOI_AFTER',
+  'RULES.TAC_TO_AWD_TARGET_DOI',
+  'RULES.TAC_TO_AWD_GATE_AWD_DOI',
+  'RULES.TAC_TO_AWD_GATE_FBA_DOI',
   'RULES.PASS2_LARGE_SHARE_OF_AWD',
   'RULES.REVIEW_ABOVE_CASES',
   'RULES.PALLET_MIN_CASES',
@@ -750,7 +785,19 @@ function reservedRatio(r) {
 }
 
 function reservedBlocked(r, y, R) {
-  return reservedRatio(r) > R.PASS1_RESERVED_RATIO && y < R.PASS1_AVAILABLE_DOI;
+  return reservedRatio(r) > R.PASS1_RESERVED_RATIO && y < R.PASS1_TRIGGER_DOI;
+}
+
+/**
+ * Take cases off until total FBA cover after the transfer fits under the
+ * ceiling. Returns the largest n that fits, which may be zero — and zero is a
+ * real answer here, not a failure: stock is available but sending any of it
+ * would overshoot.
+ */
+function fitUnderCeiling(want, r, R) {
+  var n = want;
+  while (n > 0 && doi(r.amzTotal + n * r.caseQty, r.rate) > R.MAX_FBA_DOI_AFTER) n--;
+  return n;
 }
 
 // --------------------------------------------------------------------- passes
@@ -761,33 +808,28 @@ function reservedBlocked(r, y, R) {
  * except that a single indivisible case may land as high as 110.
  */
 function pass1(r, y, dss, R, remaining) {
-  var want = roundUp((R.PASS1_AVAILABLE_DOI - y) * r.rate / r.caseQty);
-  want = clampMin0(want);
-
+  var want = clampMin0(roundUp((R.PASS1_AVAILABLE_DOI - y) * r.rate / r.caseQty));
   var rule = 'reserved-blocked, top-up available-only to '
     + R.PASS1_AVAILABLE_DOI + ' DOI';
 
-  // cap A — the largest n whose resulting total cover stays within 100 DOI.
-  var capA = Math.floor((R.PASS1_DOI_CAP * r.rate - r.amzTotal) / r.caseQty);
-  var cases = Math.min(want, clampMin0(capA));
-  var notes = [];
+  var fits = fitUnderCeiling(want, r, R);
 
-  if (cases === 0) {
-    // cap B — one case is all-or-nothing, so allow it up to 110 DOI.
-    var oneCaseDoi = doi(r.amzTotal + r.caseQty, r.rate);
-    if (oneCaseDoi <= R.PASS1_SINGLE_CASE_CAP) {
-      cases = 1;
-      notes.push('single case to ' + fmt(oneCaseDoi) + ' DOI (within '
-        + R.PASS1_SINGLE_CASE_CAP + ')');
-    } else {
-      return decision(0, '1 case would reach ' + fmt(oneCaseDoi) + ' DOI (>'
-        + R.PASS1_SINGLE_CASE_CAP + ')', { pass: 'PASS_1' });
-    }
-  } else if (cases < want) {
-    notes.push('capped at ' + R.PASS1_DOI_CAP + ' DOI');
+  if (fits === 0) {
+    // Stock is there and the available-only cover says send — but even one
+    // case overshoots. Marco flags these in red rather than losing them.
+    var oneCase = doi(r.amzTotal + r.caseQty, r.rate);
+    var d0 = decision(0, 'reserved-blocked but 1 case reaches ' + fmt(oneCase)
+      + ' DOI (>' + R.MAX_FBA_DOI_AFTER + ')', { pass: 'PASS_1' });
+    addNote(d0, fmt(100 * reservedRatio(r)) + '% of FBA stock reserved');
+    addFlag(d0, 'RESERVED_BLOCKED');
+    addFlag(d0, 'NEEDS_REVIEW');
+    return d0;
   }
 
-  var d = decision(cases, rule, { pass: 'PASS_1', notes: notes });
+  var d = decision(fits, rule, { pass: 'PASS_1' });
+  if (fits < want) {
+    addNote(d, 'held to ' + R.MAX_FBA_DOI_AFTER + ' DOI');
+  }
   return capToStock(d, r, remaining);
 }
 
@@ -808,9 +850,15 @@ function pass2(r, R, remaining) {
 
   var stockCases = casesIn(r.awdAvailableUnits, r.caseQty);
   if (d.cases < before || (stockCases > 0 && d.cases >= stockCases)) {
+    addNote(d, 'sending all AWD stock');
     addFlag(d, 'NEEDS_REVIEW');
   } else if (stockCases > 0 && d.cases / stockCases >= R.PASS2_LARGE_SHARE_OF_AWD) {
     addNote(d, 'takes ' + fmt(100 * d.cases / stockCases) + '% of AWD stock');
+    addFlag(d, 'NEEDS_REVIEW');
+  }
+  // Sitting this thin on a priority line usually means the rate is inflated.
+  if (r.amzDoi < R.PASS2_FLAG_BELOW_DOI) {
+    addNote(d, 'only ' + fmt(r.amzDoi) + ' DOI before transfer — check the rate');
     addFlag(d, 'NEEDS_REVIEW');
   }
   return d;
@@ -830,7 +878,15 @@ function pass3(r, dss, R, remaining) {
     ? 'AWD + FBA under ' + dss + ' DOI, sending all available'
     : 'baseline ' + dss + ' DOI';
 
-  var d = decision(want, rule, { pass: 'PASS_3' });
+  var fits = fitUnderCeiling(want, r, R);
+  if (fits === 0) {
+    return decision(0, '1 case would reach '
+      + fmt(doi(r.amzTotal + r.caseQty, r.rate)) + ' DOI (>'
+      + R.MAX_FBA_DOI_AFTER + ')', { pass: 'PASS_3' });
+  }
+
+  var d = decision(fits, rule, { pass: 'PASS_3' });
+  if (fits < want) addNote(d, 'held to ' + R.MAX_FBA_DOI_AFTER + ' DOI');
   capToStock(d, r, remaining);
 
   if (d.cases > R.REVIEW_ABOVE_CASES) {
@@ -893,39 +949,46 @@ function applyLtf(d, r, ltfIndex) {
  */
 
 function planTacToAwd(rows, cfg, ltfIndex) {
-  var dss = dssFor(cfg, 'TAC_TO_AWD');
   var R = cfg.RULES;
+  var target = R.TAC_TO_AWD_TARGET_DOI;
 
   var out = rows.map(function (r) {
     if (isDiscontinued(r)) {
-      return decision(0, 'discontinued', { pass: 'NONE' });
+      return decision(0, 'discontinued — never Tactical > AWD', { pass: 'NONE' });
     }
     if (!(r.rate > 0)) {
       return decision(0, 'no order_plan_rate', { pass: 'NONE' });
     }
-
-    var want = clampMin0(
-      dssLadder(dss, r.wrDoi, r.awdDoi, r.availableCases, r.rate, r.caseQty));
-
-    if (want === 0) {
-      return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI',
-        { pass: 'PASS_3' });
+    if (r.caseQty <= 0) {
+      return decision(0, 'no case size', { pass: 'NONE' });
+    }
+    if (r.availableCases <= 0) {
+      return decision(0, 'no stock at Tactical', { pass: 'NONE' });
     }
 
-    var rule = (r.wrDoi + r.awdDoi < dss)
-      ? 'Tactical + AWD under ' + dss + ' DOI, sending all available'
-      : 'baseline ' + dss + ' DOI';
+    // The entry filter: short at BOTH ends. Thin at AWD while FBA is
+    // comfortable is not a reason to move a pallet — FBA is what AWD feeds,
+    // and it can wait for a run where something is genuinely at risk.
+    if (!(r.awdDoi < R.TAC_TO_AWD_GATE_AWD_DOI)) {
+      return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI', { pass: 'NONE' });
+    }
+    if (r.fbaDoi !== null && r.fbaDoi !== undefined
+        && !(r.fbaDoi < R.TAC_TO_AWD_GATE_FBA_DOI)) {
+      return decision(0, 'no need — FBA healthy at ' + fmt(r.fbaDoi) + ' DOI',
+        { pass: 'NONE' });
+    }
 
-    var d = decision(want, rule, { pass: 'PASS_3' });
+    var want = clampMin0(roundUp((target - r.awdDoi) * r.rate / r.caseQty));
+    if (want === 0) {
+      return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI (target '
+        + target + ')', { pass: 'NONE' });
+    }
 
-    // Stock cap. The floor is a separate, later constraint.
+    var d = decision(want, 'top-up AWD to ' + target + ' DOI', { pass: 'PASS_3' });
+
     if (d.cases > r.availableCases) {
       d.cases = clampMin0(r.availableCases);
-      addNote(d, 'capped by Tactical stock');
-      addFlag(d, 'NEEDS_REVIEW');
-    }
-    if (d.cases > R.REVIEW_ABOVE_CASES) {
-      addNote(d, 'over ' + R.REVIEW_ABOVE_CASES + ' cases');
+      addNote(d, 'capped by Tactical stock (' + r.availableCases + ' cases)');
       addFlag(d, 'NEEDS_REVIEW');
     }
     return d;
@@ -950,84 +1013,50 @@ function isDiscontinued(r) {
  * Returns { urgent, reasons, thinnest } — `reasons` names the SKUs that
  * justify the run, so the verdict can say why rather than just yes or no.
  */
-function assessUrgency(rows, decisions, cfg) {
-  var R = cfg.RULES;
-  var urgent = [];
-  var thinnest = null;
-
-  rows.forEach(function (r, i) {
-    if (isDiscontinued(r) || !(r.rate > 0)) return;
-    if (!decisions[i] || decisions[i].cases <= 0) return;
-
-    if (thinnest === null || r.awdDoi < thinnest.awdDoi) thinnest = r;
-
-    // Both, not either. AWD is a buffer in front of FBA, so an empty buffer
-    // only matters when FBA is close enough to needing it.
-    var thin = r.awdDoi < R.TAC_TO_AWD_URGENCY_AWD_DOI;
-    var fbaCanHold = r.fbaDoi !== null && r.fbaDoi !== undefined
-      && r.fbaDoi >= R.TAC_TO_AWD_HEALTHY_FBA_DOI;
-
-    if (thin && !fbaCanHold) {
-      urgent.push({
-        sku: r.sku,
-        awdDoi: r.awdDoi,
-        fbaDoi: r.fbaDoi,
-        cases: decisions[i].cases,
-      });
-    }
-  });
-
-  urgent.sort(function (a, b) { return a.awdDoi - b.awdDoi; });
-  return { urgent: urgent, thinnest: thinnest };
-}
-
-/**
- * The lane's verdict: raise this transfer order, or hold it for a later run.
- *
- * Holding zeroes the lane rather than leaving numbers nobody intends to ship,
- * and every row that wanted stock says why it is being held instead.
- */
 function decideTacToAwdRun(rows, decisions, cfg) {
   var R = cfg.RULES;
   var demand = decisions.reduce(function (s, d) { return s + (d.cases > 0 ? d.cases : 0); }, 0);
-  var assessment = assessUrgency(rows, decisions, cfg);
+
+  var contributors = [];
+  rows.forEach(function (r, i) {
+    if (decisions[i].cases > 0) {
+      contributors.push({ sku: r.sku, cases: decisions[i].cases, awdDoi: r.awdDoi });
+    }
+  });
+  contributors.sort(function (a, b) { return a.awdDoi - b.awdDoi; });
 
   if (demand === 0) {
-    return {
-      raise: false, demandCases: 0, urgent: [],
-      why: 'nothing below the ' + dssFor(cfg, 'TAC_TO_AWD') + ' DOI target at AWD',
-    };
+    return { raise: false, demandCases: 0, why: 'nothing short at both AWD and FBA' };
   }
 
-  if (!assessment.urgent.length) {
-    var t = assessment.thinnest;
-    var why = 'nothing urgent — '
-      + (t ? 'thinnest is ' + t.sku + ' at ' + fmt(t.awdDoi) + ' DOI at AWD'
-        + (t.fbaDoi ? ', FBA on ' + fmt(t.fbaDoi) : '') : 'no SKU below '
-        + R.TAC_TO_AWD_URGENCY_AWD_DOI + ' DOI')
-      + '. ' + demand + ' cases of demand would need '
-      + clampMin0(R.PALLET_MIN_CASES - demand) + ' cases of filler to make a pallet';
+  // The pallet is the decider. Everything that qualifies is already genuinely
+  // short at both ends, so there is no filler to reach for — if the qualifying
+  // volume will not fill a pallet, the run waits for one where it does.
+  if (demand < R.PALLET_MIN_CASES) {
+    var why = 'only ' + demand + ' case' + (demand === 1 ? '' : 's')
+      + ' qualify, short of the ' + R.PALLET_MIN_CASES + '-case pallet'
+      + (contributors.length ? ' (thinnest ' + contributors[0].sku + ' at '
+        + fmt(contributors[0].awdDoi) + ' DOI at AWD)' : '')
+      + ' — wait for a run that fills one';
 
     rows.forEach(function (r, i) {
       if (decisions[i].cases <= 0) return;
       decisions[i] = decision(0, 'held for a later run', {
         pass: 'NONE',
-        notes: ['would have sent ' + decisions[i].cases + ' cases, AWD on '
-          + fmt(r.awdDoi) + ' DOI — not urgent'],
+        notes: ['would have sent ' + decisions[i].cases + ' cases; run totals '
+          + demand + ' of ' + R.PALLET_MIN_CASES],
       });
     });
-
-    return { raise: false, demandCases: demand, urgent: [], why: why, held: true };
+    return { raise: false, demandCases: demand, why: why, held: true };
   }
 
   return {
     raise: true,
     demandCases: demand,
-    urgent: assessment.urgent,
-    why: assessment.urgent.length + ' SKU' + (assessment.urgent.length === 1 ? '' : 's')
-      + ' running thin at AWD — ' + assessment.urgent.slice(0, 3).map(function (u) {
-        return u.sku + ' (' + fmt(u.awdDoi) + ' DOI)';
-      }).join(', ') + (assessment.urgent.length > 3 ? ' and others' : ''),
+    why: contributors.length + ' SKU' + (contributors.length === 1 ? '' : 's')
+      + ' short at both ends — ' + contributors.slice(0, 3).map(function (u) {
+        return u.sku + ' (' + fmt(u.awdDoi) + ' DOI at AWD)';
+      }).join(', ') + (contributors.length > 3 ? ' and others' : ''),
   };
 }
 
@@ -1464,13 +1493,17 @@ function planUsTransferOrders(input, cfg) {
   // 3 — Tactical > AWD demand
   var tacAwdDec = planTacToAwd(input.tacToAwd, cfg, ltf);
 
-  // 3b — is this run worth raising? Deciding before contention means a held
-  // run gives its Tactical stock back to the FBA lane instead of reserving it.
-  var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
-
   // 4 — one floor, two lanes
   var alloc = allocateTactical(input.tacToAwd, tacAwdDec,
     input.tacToFba, tacFbaDec, cfg);
+
+  // 4b — is this run worth raising?
+  //
+  // Asked *after* the floor, because the floor is most of the answer. Five of
+  // the twelve SKUs that qualified on 08-13 could not give up a single case
+  // without breaking their minimum at Tactical; counting them left 25 cases
+  // and a pallet, counting what could actually move left 13 and a wait.
+  var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
 
   // 5 — the pallet minimum applies to a run that is going, and only then
   var pallet = tacAwdVerdict.raise

@@ -110,7 +110,19 @@ function reservedRatio(r) {
 }
 
 function reservedBlocked(r, y, R) {
-  return reservedRatio(r) > R.PASS1_RESERVED_RATIO && y < R.PASS1_AVAILABLE_DOI;
+  return reservedRatio(r) > R.PASS1_RESERVED_RATIO && y < R.PASS1_TRIGGER_DOI;
+}
+
+/**
+ * Take cases off until total FBA cover after the transfer fits under the
+ * ceiling. Returns the largest n that fits, which may be zero — and zero is a
+ * real answer here, not a failure: stock is available but sending any of it
+ * would overshoot.
+ */
+function fitUnderCeiling(want, r, R) {
+  var n = want;
+  while (n > 0 && doi(r.amzTotal + n * r.caseQty, r.rate) > R.MAX_FBA_DOI_AFTER) n--;
+  return n;
 }
 
 // --------------------------------------------------------------------- passes
@@ -121,33 +133,28 @@ function reservedBlocked(r, y, R) {
  * except that a single indivisible case may land as high as 110.
  */
 function pass1(r, y, dss, R, remaining) {
-  var want = roundUp((R.PASS1_AVAILABLE_DOI - y) * r.rate / r.caseQty);
-  want = clampMin0(want);
-
+  var want = clampMin0(roundUp((R.PASS1_AVAILABLE_DOI - y) * r.rate / r.caseQty));
   var rule = 'reserved-blocked, top-up available-only to '
     + R.PASS1_AVAILABLE_DOI + ' DOI';
 
-  // cap A — the largest n whose resulting total cover stays within 100 DOI.
-  var capA = Math.floor((R.PASS1_DOI_CAP * r.rate - r.amzTotal) / r.caseQty);
-  var cases = Math.min(want, clampMin0(capA));
-  var notes = [];
+  var fits = fitUnderCeiling(want, r, R);
 
-  if (cases === 0) {
-    // cap B — one case is all-or-nothing, so allow it up to 110 DOI.
-    var oneCaseDoi = doi(r.amzTotal + r.caseQty, r.rate);
-    if (oneCaseDoi <= R.PASS1_SINGLE_CASE_CAP) {
-      cases = 1;
-      notes.push('single case to ' + fmt(oneCaseDoi) + ' DOI (within '
-        + R.PASS1_SINGLE_CASE_CAP + ')');
-    } else {
-      return decision(0, '1 case would reach ' + fmt(oneCaseDoi) + ' DOI (>'
-        + R.PASS1_SINGLE_CASE_CAP + ')', { pass: 'PASS_1' });
-    }
-  } else if (cases < want) {
-    notes.push('capped at ' + R.PASS1_DOI_CAP + ' DOI');
+  if (fits === 0) {
+    // Stock is there and the available-only cover says send — but even one
+    // case overshoots. Marco flags these in red rather than losing them.
+    var oneCase = doi(r.amzTotal + r.caseQty, r.rate);
+    var d0 = decision(0, 'reserved-blocked but 1 case reaches ' + fmt(oneCase)
+      + ' DOI (>' + R.MAX_FBA_DOI_AFTER + ')', { pass: 'PASS_1' });
+    addNote(d0, fmt(100 * reservedRatio(r)) + '% of FBA stock reserved');
+    addFlag(d0, 'RESERVED_BLOCKED');
+    addFlag(d0, 'NEEDS_REVIEW');
+    return d0;
   }
 
-  var d = decision(cases, rule, { pass: 'PASS_1', notes: notes });
+  var d = decision(fits, rule, { pass: 'PASS_1' });
+  if (fits < want) {
+    addNote(d, 'held to ' + R.MAX_FBA_DOI_AFTER + ' DOI');
+  }
   return capToStock(d, r, remaining);
 }
 
@@ -168,9 +175,15 @@ function pass2(r, R, remaining) {
 
   var stockCases = casesIn(r.awdAvailableUnits, r.caseQty);
   if (d.cases < before || (stockCases > 0 && d.cases >= stockCases)) {
+    addNote(d, 'sending all AWD stock');
     addFlag(d, 'NEEDS_REVIEW');
   } else if (stockCases > 0 && d.cases / stockCases >= R.PASS2_LARGE_SHARE_OF_AWD) {
     addNote(d, 'takes ' + fmt(100 * d.cases / stockCases) + '% of AWD stock');
+    addFlag(d, 'NEEDS_REVIEW');
+  }
+  // Sitting this thin on a priority line usually means the rate is inflated.
+  if (r.amzDoi < R.PASS2_FLAG_BELOW_DOI) {
+    addNote(d, 'only ' + fmt(r.amzDoi) + ' DOI before transfer — check the rate');
     addFlag(d, 'NEEDS_REVIEW');
   }
   return d;
@@ -190,7 +203,15 @@ function pass3(r, dss, R, remaining) {
     ? 'AWD + FBA under ' + dss + ' DOI, sending all available'
     : 'baseline ' + dss + ' DOI';
 
-  var d = decision(want, rule, { pass: 'PASS_3' });
+  var fits = fitUnderCeiling(want, r, R);
+  if (fits === 0) {
+    return decision(0, '1 case would reach '
+      + fmt(doi(r.amzTotal + r.caseQty, r.rate)) + ' DOI (>'
+      + R.MAX_FBA_DOI_AFTER + ')', { pass: 'PASS_3' });
+  }
+
+  var d = decision(fits, rule, { pass: 'PASS_3' });
+  if (fits < want) addNote(d, 'held to ' + R.MAX_FBA_DOI_AFTER + ' DOI');
   capToStock(d, r, remaining);
 
   if (d.cases > R.REVIEW_ABOVE_CASES) {
