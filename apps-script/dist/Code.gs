@@ -477,6 +477,34 @@ var CONFIG = {
     '05. May', '06. June', '07. July', '08. August',
     '09. September', '10. October', '11. November', '12. December'],
 
+  /**
+   * Step one: pull current values out of the IMS into the planner's lane tabs.
+   *
+   * The planner is a copy of the previous run, so without this every lane still
+   * holds the previous run's numbers and the whole plan is correct arithmetic
+   * on stale inputs.
+   */
+  REFRESH: {
+    /** Do it automatically at the start of every run. */
+    ENABLED: true,
+
+    /**
+     * Columns the refresh must not touch, 0-based, per lane.
+     *
+     * The Tactical minimum is not in the IMS — it is looked up from the B2B tab
+     * and kept visible on purpose. Pasting over it is how a floor of 100 turns
+     * into a floor of nothing, which is the failure that emptied five SKUs.
+     */
+    PRESERVE_COLS: {
+      TAC_TO_AWD: [1],   // B  min. units at Tactical
+      AWD_TO_FBA: [1],   // B  Critical?  (a planner-side lookup)
+      TAC_TO_FBA: [1, 2], // B min. units, C Critical?
+    },
+
+    /** How much of the header must match before a tab is accepted as the source. */
+    HEADER_MATCH_MIN: 0.6,
+  },
+
   HISTORY_FILE_NAME: 'US TO history',
 
   MARKET: 'US',
@@ -507,6 +535,7 @@ var CONFIG_OVERRIDABLE = [
   'RULES.FBA_DOI_CONTENTION',
   'RULES.TAC_TO_FBA_QTY_MODE',
   'SOURCES.LANES_FROM',
+  'REFRESH.ENABLED',
   'MIN_UNITS.TAB',
 ];
 
@@ -2396,7 +2425,11 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
     ['', ''],
     ['Built', Utilities.formatDate(new Date(), cfg.TIMEZONE, 'yyyy-MM-dd HH:mm z')],
     ['Snapshot', c.snapshot || 'live'],
-    ['Lane values from', input.meta.laneSource],
+    ['Lane values from', input.meta.refreshed
+      ? input.meta.refreshed.map(function (r) {
+        return r.ok ? r.from + ' (' + r.rows + ' rows)' : r.lane + ' NOT REFRESHED — ' + r.note;
+      }).join('; ')
+      : input.meta.laneSource + ' (not refreshed this run)'],
     ['Tactical floor from', input.meta.minUnitsSource],
     ['', ''],
     ['DSS — Tactical > AWD', dssFor(cfg, 'TAC_TO_AWD')],
@@ -2807,6 +2840,164 @@ function authoriseDataSourcesMenu() {
 }
 
 // ========================================================================
+// Refresh.gs
+// ========================================================================
+
+/**
+ * Step one of the manual process, which the script had been skipping: pull the
+ * current numbers out of the IMS and paste them into the planner as values.
+ *
+ * Without this the planner is a copy of the last run and the lanes still hold
+ * the last run's data. Everything downstream is then correct arithmetic on
+ * stale inputs, which is the most expensive kind of wrong — it looks fine.
+ *
+ * Two things are deliberate:
+ *
+ *  - Values, not formulas. The planner is a record of what was decided and the
+ *    numbers behind it; a live formula would rewrite that record every time
+ *    the IMS moves, and a back-test against it would measure nothing.
+ *
+ *  - Locally-added columns survive. The Tactical minimum in column B is not in
+ *    the IMS — it is looked up from the B2B tab and Marco keeps it visible on
+ *    purpose. A blind paste would erase it, which is exactly how a floor of 100
+ *    becomes a floor of nothing.
+ */
+
+/**
+ * Find the IMS tab that feeds a lane.
+ *
+ * Prefers the configured name, then matches on the header row itself. Matching
+ * on headers rather than names means a renamed tab still resolves, and a tab
+ * that has been restructured fails loudly instead of pasting the wrong columns
+ * into the right ones.
+ */
+function findImsLaneTab(ims, plannerSheet, configuredName, cfg) {
+  if (configuredName) {
+    var named = sheetByName(ims, configuredName);
+    if (named) return { sheet: named, how: 'configured name' };
+  }
+
+  var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
+  var want = plannerSheet.getRange(headerRow, 1, 1, plannerSheet.getLastColumn())
+    .getValues()[0].map(headerKey).filter(String);
+  if (!want.length) return { sheet: null, how: 'planner has no header row' };
+
+  var best = null;
+  ims.getSheets().forEach(function (sh) {
+    if (sh.getLastRow() < headerRow || sh.getLastColumn() < 1) return;
+    var got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
+      .getValues()[0].map(headerKey);
+    var hits = 0;
+    want.forEach(function (h) { if (got.indexOf(h) !== -1) hits++; });
+    var score = hits / want.length;
+    if (!best || score > best.score) best = { sheet: sh, score: score };
+  });
+
+  if (best && best.score >= cfg.REFRESH.HEADER_MATCH_MIN) {
+    return { sheet: best.sheet, how: 'header match ' + Math.round(100 * best.score) + '%' };
+  }
+  return {
+    sheet: null,
+    how: 'no IMS tab matched the header (best '
+      + (best ? Math.round(100 * best.score) + '%' : 'none') + ')',
+  };
+}
+
+function headerKey(v) {
+  return String(v === null || v === undefined ? '' : v)
+    .replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+/**
+ * Copy one lane's values across, column by column, honouring the preserve list.
+ *
+ * Columns are matched by header, not by position: the IMS and the planner do
+ * not have to agree on layout, and a column that has moved on one side lands
+ * where it belongs on the other.
+ */
+function refreshLane(ims, planner, laneKey, cfg) {
+  var tabName = cfg.TABS[laneKey];
+  var plannerSheet = sheetByName(planner, tabName);
+  if (!plannerSheet) return { lane: tabName, ok: false, note: 'no such tab in the planner' };
+
+  var found = findImsLaneTab(ims, plannerSheet,
+    cfg.SOURCES.IMS_LANE_TABS[laneKey], cfg);
+  if (!found.sheet) return { lane: tabName, ok: false, note: found.how };
+
+  var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
+  var firstRow = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+
+  var src = found.sheet;
+  var srcHeader = src.getRange(headerRow, 1, 1, src.getLastColumn())
+    .getValues()[0].map(headerKey);
+  var dstHeader = plannerSheet.getRange(headerRow, 1, 1, plannerSheet.getLastColumn())
+    .getValues()[0].map(headerKey);
+
+  var srcLast = src.getLastRow();
+  if (srcLast < firstRow) return { lane: tabName, ok: false, note: 'IMS tab has no data' };
+  var srcRows = srcLast - firstRow + 1;
+  var srcValues = src.getRange(firstRow, 1, srcRows, src.getLastColumn()).getValues();
+
+  var preserve = (cfg.REFRESH.PRESERVE_COLS[laneKey] || []).slice();
+  var copied = [];
+  var skipped = [];
+
+  for (var d = 0; d < dstHeader.length; d++) {
+    if (!dstHeader[d]) continue;
+    if (preserve.indexOf(d) !== -1) { skipped.push(d); continue; }
+    var s = srcHeader.indexOf(dstHeader[d]);
+    if (s === -1) continue;               // planner-only column: leave it alone
+
+    var col = [];
+    for (var r = 0; r < srcRows; r++) col.push([srcValues[r][s]]);
+    plannerSheet.getRange(firstRow, d + 1, srcRows, 1).setValues(col);
+    copied.push(d);
+  }
+
+  // Anything below the incoming data is last run's tail — clear it, or the
+  // lane keeps SKUs the IMS no longer lists.
+  var dstLast = plannerSheet.getLastRow();
+  if (dstLast > srcLast) {
+    plannerSheet.getRange(srcLast + 1, 1, dstLast - srcLast,
+      plannerSheet.getLastColumn()).clearContent();
+  }
+
+  return {
+    lane: tabName, ok: true, rows: srcRows, from: src.getName(), how: found.how,
+    copied: copied.length, preserved: skipped.length,
+  };
+}
+
+/** Refresh all three lanes. Returns one result per lane. */
+function refreshLanesFromIms(planner, cfg) {
+  var conf = cfg || config();
+  var ims = SpreadsheetApp.openById(conf.SOURCES.IMS_ID);
+  return ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].map(function (k) {
+    return refreshLane(ims, planner, k, conf);
+  });
+}
+
+function refreshLanesMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var answer = ui.alert('Refresh from the IMS?',
+    'The three lane tabs in "' + ss.getName() + '" will be overwritten with '
+    + 'current values from the Inventory Monitoring Sheet.\n\nColumns the '
+    + 'planner adds itself — the Tactical minimum in column B — are left alone.',
+    ui.ButtonSet.OK_CANCEL);
+  if (answer !== ui.Button.OK) return null;
+
+  var out = refreshLanesFromIms(ss, config());
+  var lines = out.map(function (r) {
+    return (r.ok ? '✓ ' + r.lane + ' — ' + r.rows + ' rows from "' + r.from
+      + '" (' + r.how + '), ' + r.copied + ' columns, ' + r.preserved + ' preserved'
+      : '✗ ' + r.lane + ' — ' + r.note);
+  });
+  ui.alert('Refreshed from the IMS', lines.join('\n\n'), ui.ButtonSet.OK);
+  return out;
+}
+
+// ========================================================================
 // History.gs
 // ========================================================================
 
@@ -3171,6 +3362,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Dry run (report only, writes nothing)', 'dryRun')
     .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
+    .addItem('Refresh lanes from the IMS', 'refreshLanesMenu')
     .addSeparator()
     .addItem('Record what shipped (after raising the orders)', 'recordShippedMenu')
     .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
@@ -3211,6 +3403,13 @@ function buildPlanHere() {
 function dryRun() {
   var cfg = config();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // The refresh runs here too. A dry run against last week's numbers tells you
+  // nothing about this week, and the refresh touches inputs, not decisions.
+  authoriseDataSources(ss, cfg);
+  var refreshed = cfg.REFRESH.ENABLED ? refreshLanesFromIms(ss, cfg) : null;
+  if (refreshed) SpreadsheetApp.flush();
+
   var input = readPlanningInput(ss, cfg);
   var plan = planUsTransferOrders(input, cfg);
 
@@ -3222,8 +3421,14 @@ function dryRun() {
     'Floor breaches: ' + plan.totals.floorBreaches,
     '',
     'Tactical floor from: ' + input.meta.minUnitsSource,
+    '',
+    refreshed
+      ? 'Lanes refreshed: ' + refreshed.map(function (r) {
+        return r.ok ? r.rows + ' rows from "' + r.from + '"' : r.lane + ' FAILED';
+      }).join(' · ')
+      : 'Lanes NOT refreshed — planning against whatever is in the tabs.',
   ]);
-  SpreadsheetApp.getUi().alert('Dry run — nothing written', lines.join('\n'),
+  SpreadsheetApp.getUi().alert('Dry run — no decisions written', lines.join('\n'),
     SpreadsheetApp.getUi().ButtonSet.OK);
   return plan;
 }
@@ -3233,7 +3438,23 @@ function runPlan(planner, cfg, ctx) {
   // Clear the IMPORTRANGE grants before reading, so a fresh copy does not plan
   // against a sheet full of #REF!.
   authoriseDataSources(planner, cfg);
+
+  // Step one of the manual process: current values out of the IMS, pasted in.
+  // Skipping it means planning against the previous run's numbers.
+  var refreshed = null;
+  if (cfg.REFRESH.ENABLED) {
+    refreshed = refreshLanesFromIms(planner, cfg);
+    var failed = refreshed.filter(function (r) { return !r.ok; });
+    if (failed.length === refreshed.length) {
+      throw new Error('Could not refresh any lane from the IMS:\n  '
+        + failed.map(function (r) { return r.lane + ' — ' + r.note; }).join('\n  ')
+        + '\n\nSet SOURCES.IMS_LANE_TABS if the tabs cannot be matched by header.');
+    }
+    SpreadsheetApp.flush();
+  }
+
   var input = readPlanningInput(planner, cfg);
+  input.meta.refreshed = refreshed;
   var plan = planUsTransferOrders(input, cfg);
   writePlan(planner, input, plan, cfg, ctx);
   // Log every decision, shipped column blank until the orders are raised.

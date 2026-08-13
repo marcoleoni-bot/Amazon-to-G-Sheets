@@ -332,7 +332,11 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
     ['', ''],
     ['Built', Utilities.formatDate(new Date(), cfg.TIMEZONE, 'yyyy-MM-dd HH:mm z')],
     ['Snapshot', c.snapshot || 'live'],
-    ['Lane values from', input.meta.laneSource],
+    ['Lane values from', input.meta.refreshed
+      ? input.meta.refreshed.map(function (r) {
+        return r.ok ? r.from + ' (' + r.rows + ' rows)' : r.lane + ' NOT REFRESHED — ' + r.note;
+      }).join('; ')
+      : input.meta.laneSource + ' (not refreshed this run)'],
     ['Tactical floor from', input.meta.minUnitsSource],
     ['', ''],
     ['DSS — Tactical > AWD', dssFor(cfg, 'TAC_TO_AWD')],

@@ -691,3 +691,23 @@ test('the full pipeline runs the lanes in dependency order', () => {
   assert.ok(plan.pallet.demandCases > 0);
   assert.equal(typeof plan.totals.needsReview, 'number');
 });
+
+// ------------------------------------------------------------------ refresh
+
+test('IMS tabs are matched on their headers, not their names', () => {
+  // A renamed tab still resolves; a restructured one is refused rather than
+  // pasted column-for-column into the wrong places.
+  assert.equal(G.headerKey('  AWD  Available   Qty '), 'awd available qty');
+  assert.equal(G.headerKey(null), '');
+  assert.equal(G.headerKey(42), '42');
+});
+
+test('the refresh preserves the columns the planner adds itself', () => {
+  const c = cfg();
+  // The Tactical minimum is not in the IMS — pasting over it is how a floor of
+  // 100 becomes a floor of nothing.
+  assert.ok(c.REFRESH.PRESERVE_COLS.TAC_TO_AWD.includes(c.COLS.TAC_TO_AWD.MIN_UNITS));
+  assert.ok(c.REFRESH.PRESERVE_COLS.TAC_TO_FBA.includes(c.COLS.TAC_TO_FBA.MIN_UNITS));
+  assert.ok(c.REFRESH.PRESERVE_COLS.TAC_TO_FBA.includes(c.COLS.TAC_TO_FBA.CRITICAL));
+  assert.equal(c.REFRESH.ENABLED, true, 'step one runs by default');
+});

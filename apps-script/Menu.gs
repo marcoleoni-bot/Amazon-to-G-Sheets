@@ -15,6 +15,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Dry run (report only, writes nothing)', 'dryRun')
     .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
+    .addItem('Refresh lanes from the IMS', 'refreshLanesMenu')
     .addSeparator()
     .addItem('Record what shipped (after raising the orders)', 'recordShippedMenu')
     .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
@@ -55,6 +56,13 @@ function buildPlanHere() {
 function dryRun() {
   var cfg = config();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // The refresh runs here too. A dry run against last week's numbers tells you
+  // nothing about this week, and the refresh touches inputs, not decisions.
+  authoriseDataSources(ss, cfg);
+  var refreshed = cfg.REFRESH.ENABLED ? refreshLanesFromIms(ss, cfg) : null;
+  if (refreshed) SpreadsheetApp.flush();
+
   var input = readPlanningInput(ss, cfg);
   var plan = planUsTransferOrders(input, cfg);
 
@@ -66,8 +74,14 @@ function dryRun() {
     'Floor breaches: ' + plan.totals.floorBreaches,
     '',
     'Tactical floor from: ' + input.meta.minUnitsSource,
+    '',
+    refreshed
+      ? 'Lanes refreshed: ' + refreshed.map(function (r) {
+        return r.ok ? r.rows + ' rows from "' + r.from + '"' : r.lane + ' FAILED';
+      }).join(' · ')
+      : 'Lanes NOT refreshed — planning against whatever is in the tabs.',
   ]);
-  SpreadsheetApp.getUi().alert('Dry run — nothing written', lines.join('\n'),
+  SpreadsheetApp.getUi().alert('Dry run — no decisions written', lines.join('\n'),
     SpreadsheetApp.getUi().ButtonSet.OK);
   return plan;
 }
@@ -77,7 +91,23 @@ function runPlan(planner, cfg, ctx) {
   // Clear the IMPORTRANGE grants before reading, so a fresh copy does not plan
   // against a sheet full of #REF!.
   authoriseDataSources(planner, cfg);
+
+  // Step one of the manual process: current values out of the IMS, pasted in.
+  // Skipping it means planning against the previous run's numbers.
+  var refreshed = null;
+  if (cfg.REFRESH.ENABLED) {
+    refreshed = refreshLanesFromIms(planner, cfg);
+    var failed = refreshed.filter(function (r) { return !r.ok; });
+    if (failed.length === refreshed.length) {
+      throw new Error('Could not refresh any lane from the IMS:\n  '
+        + failed.map(function (r) { return r.lane + ' — ' + r.note; }).join('\n  ')
+        + '\n\nSet SOURCES.IMS_LANE_TABS if the tabs cannot be matched by header.');
+    }
+    SpreadsheetApp.flush();
+  }
+
   var input = readPlanningInput(planner, cfg);
+  input.meta.refreshed = refreshed;
   var plan = planUsTransferOrders(input, cfg);
   writePlan(planner, input, plan, cfg, ctx);
   // Log every decision, shipped column blank until the orders are raised.

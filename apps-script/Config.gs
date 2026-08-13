@@ -464,6 +464,34 @@ var CONFIG = {
     '05. May', '06. June', '07. July', '08. August',
     '09. September', '10. October', '11. November', '12. December'],
 
+  /**
+   * Step one: pull current values out of the IMS into the planner's lane tabs.
+   *
+   * The planner is a copy of the previous run, so without this every lane still
+   * holds the previous run's numbers and the whole plan is correct arithmetic
+   * on stale inputs.
+   */
+  REFRESH: {
+    /** Do it automatically at the start of every run. */
+    ENABLED: true,
+
+    /**
+     * Columns the refresh must not touch, 0-based, per lane.
+     *
+     * The Tactical minimum is not in the IMS — it is looked up from the B2B tab
+     * and kept visible on purpose. Pasting over it is how a floor of 100 turns
+     * into a floor of nothing, which is the failure that emptied five SKUs.
+     */
+    PRESERVE_COLS: {
+      TAC_TO_AWD: [1],   // B  min. units at Tactical
+      AWD_TO_FBA: [1],   // B  Critical?  (a planner-side lookup)
+      TAC_TO_FBA: [1, 2], // B min. units, C Critical?
+    },
+
+    /** How much of the header must match before a tab is accepted as the source. */
+    HEADER_MATCH_MIN: 0.6,
+  },
+
   HISTORY_FILE_NAME: 'US TO history',
 
   MARKET: 'US',
@@ -494,6 +522,7 @@ var CONFIG_OVERRIDABLE = [
   'RULES.FBA_DOI_CONTENTION',
   'RULES.TAC_TO_FBA_QTY_MODE',
   'SOURCES.LANES_FROM',
+  'REFRESH.ENABLED',
   'MIN_UNITS.TAB',
 ];
 
