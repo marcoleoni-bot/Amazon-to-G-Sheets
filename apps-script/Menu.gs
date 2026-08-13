@@ -18,6 +18,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Record what shipped (after raising the orders)', 'recordShippedMenu')
     .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
+    .addItem('Back-fill history from past planners…', 'backfillHistoryMenu')
     .addItem('Back-test this file against its own numbers', 'backtestThisFile')
     .addItem('Back-test another planner…', 'backtestPrompt')
     .addSeparator()

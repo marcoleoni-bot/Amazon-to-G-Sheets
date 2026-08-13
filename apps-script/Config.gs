@@ -31,6 +31,9 @@ var CONFIG = {
      */
     HISTORY_ID: '',
 
+    /** Where the history workbook gets created if it does not exist yet. */
+    HISTORY_FOLDER_ID: '1M4reJpAvhw1q7hQeO7sDTZ4NcHmAFjUr',
+
     /**
      * Other workbooks this planner imports from. The authoriser also scans the
      * sheet's own formulas, so this is a safety net for a source that is not
@@ -460,6 +463,8 @@ var CONFIG = {
   MONTH_FOLDERS: ['01. January', '02. February', '03. March', '04. April',
     '05. May', '06. June', '07. July', '08. August',
     '09. September', '10. October', '11. November', '12. December'],
+
+  HISTORY_FILE_NAME: 'US TO history',
 
   MARKET: 'US',
   TIMEZONE: 'America/New_York',

@@ -33,8 +33,15 @@ function planTacToAwd(rows, cfg, ltfIndex) {
     if (!(r.awdDoi < R.TAC_TO_AWD_GATE_AWD_DOI)) {
       return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI', { pass: 'NONE' });
     }
-    if (r.fbaDoi !== null && r.fbaDoi !== undefined
-        && !(r.fbaDoi < R.TAC_TO_AWD_GATE_FBA_DOI)) {
+    // An unreadable FBA figure — "No Rate", blank, #REF! — is not zero. Read as
+    // zero it looks like the most desperate row on the tab and walks straight
+    // through a gate meant to keep it out: 101-2102 shows 0 days of FBA cover
+    // by that reading and 599 by the real one.
+    if (r.fbaDoi === null || r.fbaDoi === undefined) {
+      return decision(0, 'FBA cover unreadable — cannot confirm the need',
+        { pass: 'NONE', flags: ['NEEDS_REVIEW'] });
+    }
+    if (!(r.fbaDoi < R.TAC_TO_AWD_GATE_FBA_DOI)) {
       return decision(0, 'no need — FBA healthy at ' + fmt(r.fbaDoi) + ' DOI',
         { pass: 'NONE' });
     }

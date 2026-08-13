@@ -44,6 +44,9 @@ var CONFIG = {
      */
     HISTORY_ID: '',
 
+    /** Where the history workbook gets created if it does not exist yet. */
+    HISTORY_FOLDER_ID: '1M4reJpAvhw1q7hQeO7sDTZ4NcHmAFjUr',
+
     /**
      * Other workbooks this planner imports from. The authoriser also scans the
      * sheet's own formulas, so this is a safety net for a source that is not
@@ -473,6 +476,8 @@ var CONFIG = {
   MONTH_FOLDERS: ['01. January', '02. February', '03. March', '04. April',
     '05. May', '06. June', '07. July', '08. August',
     '09. September', '10. October', '11. November', '12. December'],
+
+  HISTORY_FILE_NAME: 'US TO history',
 
   MARKET: 'US',
   TIMEZONE: 'America/New_York',
@@ -1015,8 +1020,15 @@ function planTacToAwd(rows, cfg, ltfIndex) {
     if (!(r.awdDoi < R.TAC_TO_AWD_GATE_AWD_DOI)) {
       return decision(0, 'AWD already ' + fmt(r.awdDoi) + ' DOI', { pass: 'NONE' });
     }
-    if (r.fbaDoi !== null && r.fbaDoi !== undefined
-        && !(r.fbaDoi < R.TAC_TO_AWD_GATE_FBA_DOI)) {
+    // An unreadable FBA figure — "No Rate", blank, #REF! — is not zero. Read as
+    // zero it looks like the most desperate row on the tab and walks straight
+    // through a gate meant to keep it out: 101-2102 shows 0 days of FBA cover
+    // by that reading and 599 by the real one.
+    if (r.fbaDoi === null || r.fbaDoi === undefined) {
+      return decision(0, 'FBA cover unreadable — cannot confirm the need',
+        { pass: 'NONE', flags: ['NEEDS_REVIEW'] });
+    }
+    if (!(r.fbaDoi < R.TAC_TO_AWD_GATE_FBA_DOI)) {
       return decision(0, 'no need — FBA healthy at ' + fmt(r.fbaDoi) + ' DOI',
         { pass: 'NONE' });
     }
@@ -2823,9 +2835,15 @@ var HISTORY_HEADER = ['run_date', 'lane', 'sku', 'proposed_cases', 'shipped_case
 
 function historySheet(planner, cfg, createIfMissing) {
   var ss = planner;
-  if (cfg.SOURCES.HISTORY_ID) {
+  var id = cfg.SOURCES.HISTORY_ID;
+  if (!id) {
     try {
-      ss = SpreadsheetApp.openById(cfg.SOURCES.HISTORY_ID);
+      id = PropertiesService.getScriptProperties().getProperty('SOURCES.HISTORY_ID');
+    } catch (e) { id = null; }
+  }
+  if (id) {
+    try {
+      ss = SpreadsheetApp.openById(id);
     } catch (e) {
       ss = planner; // fall back rather than lose the run
     }
@@ -2958,6 +2976,148 @@ function historyScorecard(planner, cfg) {
   return { runs: runs };
 }
 
+// -------------------------------------------------- creating and back-filling
+
+/**
+ * Find or create the history workbook, and remember its ID.
+ *
+ * Written so nobody has to create a file, copy an ID and paste it into config:
+ * the first run makes the workbook in the transfer-orders folder, stores the ID
+ * in Script Properties, and every later run finds it there.
+ */
+function ensureHistoryWorkbook(cfg) {
+  var conf = cfg || config();
+  var props = PropertiesService.getScriptProperties();
+  var known = conf.SOURCES.HISTORY_ID || props.getProperty('SOURCES.HISTORY_ID');
+  if (known) {
+    try {
+      return { ss: SpreadsheetApp.openById(known), created: false };
+    } catch (e) {
+      // Deleted or unshared — fall through and make a new one.
+    }
+  }
+
+  var folder = DriveApp.getFolderById(conf.SOURCES.HISTORY_FOLDER_ID
+    || conf.SOURCES.TRANSFER_ORDERS_FOLDER_ID);
+  var name = conf.HISTORY_FILE_NAME;
+
+  var existing = folder.getFilesByName(name);
+  var ss = existing.hasNext()
+    ? SpreadsheetApp.openById(existing.next().getId())
+    : null;
+  var created = false;
+
+  if (!ss) {
+    ss = SpreadsheetApp.create(name);
+    DriveApp.getFileById(ss.getId()).moveTo(folder);
+    var first = ss.getSheets()[0];
+    first.setName(conf.TABS.HISTORY);
+    first.getRange(1, 1, 1, HISTORY_HEADER.length).setValues([HISTORY_HEADER])
+      .setFontWeight('bold').setBackground(conf.COLOURS.HEADER);
+    first.setFrozenRows(1);
+    created = true;
+  }
+
+  props.setProperty('SOURCES.HISTORY_ID', ss.getId());
+  return { ss: ss, created: created };
+}
+
+/**
+ * Replay past planners into the history.
+ *
+ * Each one carries its own snapshot and its own outcome, so a run that happened
+ * before any of this existed is still a labelled example. Rows already recorded
+ * for a run date are removed first, so re-running corrects rather than doubles.
+ *
+ * `fileIds` may be IDs or full URLs; with none given it walks the
+ * transfer-orders folder for anything named MM-DD-YY.
+ */
+function backfillHistory(fileIds, cfg) {
+  var conf = cfg || config();
+  ensureHistoryWorkbook(conf);
+
+  var ids = (fileIds && fileIds.length) ? fileIds.map(function (x) {
+    var m = String(x).match(/[-\w]{25,}/);
+    return m ? m[0] : String(x).trim();
+  }) : discoverPlanners(conf);
+
+  var done = [];
+  ids.forEach(function (id) {
+    try {
+      var ss = SpreadsheetApp.openById(id);
+      var date = plannerDate(ss.getName());
+      if (!date) { done.push({ id: id, ok: false, note: 'name is not MM-DD-YY' }); return; }
+
+      forgetRun(date, conf);
+      var input = readPlanningInput(ss, conf);
+      var plan = planUsTransferOrders(input, conf);
+      var rows = appendHistory(ss, input, plan, conf);
+      var rec = recordShipped(ss, conf);
+      done.push({ id: id, ok: true, name: ss.getName(), rows: rows,
+        reconciled: rec.updated });
+    } catch (e) {
+      done.push({ id: id, ok: false, note: e.message });
+    }
+  });
+  return done;
+}
+
+/** Planner files in the transfer-orders tree, newest first. */
+function discoverPlanners(cfg) {
+  var out = [];
+  var root = DriveApp.getFolderById(cfg.SOURCES.TRANSFER_ORDERS_FOLDER_ID);
+  var months = root.getFolders();
+  while (months.hasNext()) {
+    var markets = months.next().getFolders();
+    while (markets.hasNext()) {
+      var m = markets.next();
+      if (m.getName().trim().toUpperCase() !== cfg.MARKET) continue;
+      var files = m.getFiles();
+      while (files.hasNext()) {
+        var f = files.next();
+        if (plannerDate(f.getName())) out.push(f.getId());
+      }
+    }
+  }
+  return out;
+}
+
+/** Drop every history row for one run date, so a replay replaces it. */
+function forgetRun(date, cfg) {
+  var sh = historySheet(null, cfg, false);
+  if (!sh || sh.getLastRow() < 2) return 0;
+  var vals = sh.getRange(2, 1, sh.getLastRow() - 1, HISTORY_HEADER.length).getValues();
+  var keep = vals.filter(function (v) { return !isSameDay(v[0], date); });
+  var dropped = vals.length - keep.length;
+  if (!dropped) return 0;
+  sh.getRange(2, 1, vals.length, HISTORY_HEADER.length).clearContent();
+  if (keep.length) {
+    sh.getRange(2, 1, keep.length, HISTORY_HEADER.length).setValues(keep);
+  }
+  return dropped;
+}
+
+function backfillHistoryMenu() {
+  var ui = SpreadsheetApp.getUi();
+  var res = ui.prompt('Back-fill TO history',
+    'Planner URLs or IDs, comma separated.\nLeave blank to sweep the whole '
+    + 'Transfer orders folder.', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return null;
+
+  var raw = res.getResponseText().trim();
+  var ids = raw ? raw.split(/[,\s]+/).filter(String) : [];
+  var out = backfillHistory(ids, config());
+
+  var lines = out.map(function (r) {
+    return (r.ok ? '✓ ' + r.name + ' — ' + r.rows + ' rows, ' + r.reconciled
+      + ' reconciled' : '✗ ' + r.id + ' — ' + r.note);
+  });
+  lines.unshift(out.filter(function (r) { return r.ok; }).length + ' of '
+    + out.length + ' planners recorded.', '');
+  ui.alert('Back-fill', lines.join('\n'), ui.ButtonSet.OK);
+  return out;
+}
+
 // ------------------------------------------------------------------ menu
 
 function recordShippedMenu() {
@@ -3014,6 +3174,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Record what shipped (after raising the orders)', 'recordShippedMenu')
     .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
+    .addItem('Back-fill history from past planners…', 'backfillHistoryMenu')
     .addItem('Back-test this file against its own numbers', 'backtestThisFile')
     .addItem('Back-test another planner…', 'backtestPrompt')
     .addSeparator()
