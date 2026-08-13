@@ -24,7 +24,7 @@ function planAwdToFba(rows, cfg, ltfIndex) {
   rows.forEach(function (r, i) {
     if (out[i]) return;
     if (!hasRate(r)) return;
-    var y = availableOnlyDoi(r);
+    var y = availableOnlyDoi(r, R);
     if (!reservedBlocked(r, y, R)) return;
     out[i] = pass1(r, y, dss, R, remaining);
   });
@@ -98,9 +98,15 @@ function noRate(r) {
   return decision(0, 'no order_plan_rate', { pass: 'NONE' });
 }
 
-/** Y — days of cover on fulfillable stock alone, on order_plan_rate (§4). */
-function availableOnlyDoi(r) {
-  return doi(r.amzFulfillable, r.rate);
+/** The rate pass 1 works in. See Config.RULES.PASS1_RATE. */
+function pass1Rate(r, R) {
+  return (R.PASS1_RATE === 'order_plan_rate' || !(r.trueRate30 > 0))
+    ? r.rate : r.trueRate30;
+}
+
+/** Y — days of cover on fulfillable stock alone. */
+function availableOnlyDoi(r, R) {
+  return doi(r.amzFulfillable, pass1Rate(r, R));
 }
 
 /** X — reserved against fulfillable. All reserved and none fulfillable counts. */
@@ -133,7 +139,8 @@ function fitUnderCeiling(want, r, R) {
  * except that a single indivisible case may land as high as 110.
  */
 function pass1(r, y, dss, R, remaining) {
-  var want = clampMin0(roundUp((R.PASS1_AVAILABLE_DOI - y) * r.rate / r.caseQty));
+  var pr = pass1Rate(r, R);
+  var want = clampMin0(roundUp((R.PASS1_AVAILABLE_DOI - y) * pr / r.caseQty));
   var rule = 'reserved-blocked, top-up available-only to '
     + R.PASS1_AVAILABLE_DOI + ' DOI';
 

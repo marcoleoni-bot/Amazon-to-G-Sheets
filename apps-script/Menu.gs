@@ -15,6 +15,9 @@ function onOpen() {
     .addSeparator()
     .addItem('Dry run (report only, writes nothing)', 'dryRun')
     .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
+    .addSeparator()
+    .addItem('Record what shipped (after raising the orders)', 'recordShippedMenu')
+    .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
     .addItem('Back-test this file against its own numbers', 'backtestThisFile')
     .addItem('Back-test another planner…', 'backtestPrompt')
     .addSeparator()
@@ -76,6 +79,13 @@ function runPlan(planner, cfg, ctx) {
   var input = readPlanningInput(planner, cfg);
   var plan = planUsTransferOrders(input, cfg);
   writePlan(planner, input, plan, cfg, ctx);
+  // Log every decision, shipped column blank until the orders are raised.
+  try {
+    appendHistory(planner, input, plan, cfg);
+  } catch (e) {
+    // A history failure must never cost a plan that is otherwise good.
+    console.error('TO history not written: ' + e.message);
+  }
   SpreadsheetApp.flush();
   return { planner: planner, input: input, plan: plan };
 }

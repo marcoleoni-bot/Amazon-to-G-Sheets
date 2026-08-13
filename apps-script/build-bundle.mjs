@@ -21,7 +21,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // keeping it stable makes the bundle diffable.
 const ORDER = ['Config.gs', 'Lib.gs', 'Rules_AwdToFba.gs', 'Rules_TacToAwd.gs',
   'Rules_TacToFba.gs', 'Allocate.gs', 'Read.gs', 'Write.gs', 'Backtest.gs',
-  'Authorise.gs', 'Menu.gs'];
+  'Authorise.gs', 'History.gs', 'Menu.gs'];
 
 const banner = [
   '/**',

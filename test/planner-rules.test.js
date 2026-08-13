@@ -347,30 +347,40 @@ test('B2B and Critical raise the Tactical > FBA target to 100 DOI', () => {
   assert.equal(b2b.cases, 25);    // to 100 DOI
 });
 
-test('a discontinued SKU gets the minimum viable quantity, not a top-up to 100', () => {
-  // 08-10-26 101-4001: discontinued, 1-unit cases, 700 units at Tactical, AWD
-  // empty, FBA on 29.5 DOI. Read as a target rather than a cap, the 100 in §7
-  // pushes 205 units of a liquidating SKU into FBA. Marco typed 12.
-  const row = tacFbaRow({
-    sku: '101-4001', lifecycle: 'Discontinued', rate: 2.913809524,
-    tacAvailableUnits: 700, availableCases: 700, amzTotal: 86,
-    amzDoi: 29.51462657, caseQty: 1, awdAvailableUnits: 0,
-  });
-  const awd = { '101-4001': { cases: 0, cappedByAwdStock: true,
-    shortfallCases: 206, awdAvailableUnits: 0 } };
-  const [d] = G.planTacToFba([row], cfg(), {}, awd, {});
-  assert.equal(d.cases, 1);
-  assert.match(G.reasonText(d, 1), /discontinued — minimum viable qty/);
+test('a discontinued SKU is liquidated down, never past 110 DOI', () => {
+  // Send it down and aim under 50 days; the hard line is 110.
+  const c = cfg();
+  const row = tacFbaRow({ sku: 'DISC', lifecycle: 'Discontinued', rate: 2,
+    amzTotal: 40, amzDoi: 20, caseQty: 20, availableCases: 50,
+    tacAvailableUnits: 1000, awdAvailableUnits: 0 });
+  const awd = { DISC: { cases: 0, cappedByAwdStock: true, shortfallCases: 6,
+    awdAvailableUnits: 0 } };
+  const [d] = G.planTacToFba([row], c, {}, awd, {});
+  assert.ok(d.cases > 0);
+  assert.ok(G.doi(row.amzTotal + d.cases * row.caseQty, row.rate) <= 110);
+  assert.match(G.reasonText(d, 20), /liquidating discontinued stock/);
 });
 
-test('a discontinued SKU already past the 100 DOI cap gets nothing', () => {
-  const row = tacFbaRow({ lifecycle: 'Discontinued', amzDoi: 111.5,
-    amzTotal: 84, rate: 0.75, caseQty: 36, awdAvailableUnits: 0 });
-  const awd = { 'TEST-1': { cases: 0, cappedByAwdStock: true,
-    shortfallCases: 3, awdAvailableUnits: 0 } };
-  const [d] = G.planTacToFba([row], cfg(), {}, awd, {});
-  assert.equal(d.cases, 0);
-  assert.match(d.rule, /already 112 DOI \(target 100\)/);
+test('a discontinued SKU whose next case crosses 110 gets none', () => {
+  const c = cfg();
+  const row = tacFbaRow({ lifecycle: 'Discontinued', rate: 0.75, amzTotal: 84,
+    amzDoi: 112, caseQty: 36, availableCases: 8, awdAvailableUnits: 0 });
+  const awd = { 'TEST-1': { cases: 0, cappedByAwdStock: true, shortfallCases: 3,
+    awdAvailableUnits: 0 } };
+  assert.equal(G.planTacToFba([row], c, {}, awd, {})[0].cases, 0);
+});
+
+test('101-4001 is filled to its 100-unit marketing floor', () => {
+  // 08-13: FBA held 55 units, case size 1, and 45 went out.
+  const c = cfg();
+  const row = tacFbaRow({ sku: '101-4001', lifecycle: 'Discontinued',
+    rate: 2.91, amzTotal: 55, amzDoi: 19, caseQty: 1, availableCases: 700,
+    tacAvailableUnits: 700, awdAvailableUnits: 0 });
+  const awd = { '101-4001': { cases: 0, cappedByAwdStock: true,
+    shortfallCases: 20, awdAvailableUnits: 0 } };
+  const [d] = G.planTacToFba([row], c, {}, awd, {});
+  assert.equal(d.cases, 45, 'Marco sent 45 units on 08-13');
+  assert.match(G.reasonText(d, 1), /100-unit floor/);
 });
 
 test('a case that would spike FBA cover is refused', () => {

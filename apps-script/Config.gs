@@ -25,6 +25,13 @@ var CONFIG = {
     MIN_UNITS_ID: '14fW_-GacyK_8JDRE9Z1EomAE87S0rpnsJ9WkxKw7lCE',
 
     /**
+     * Where the append-only TO history lives. Its own workbook, so the record
+     * outlives any single planner; blank keeps it in the planner instead,
+     * which forgets as fast as the file does.
+     */
+    HISTORY_ID: '',
+
+    /**
      * Other workbooks this planner imports from. The authoriser also scans the
      * sheet's own formulas, so this is a safety net for a source that is not
      * referenced by an IMPORTRANGE the scan can see.
@@ -113,6 +120,7 @@ var CONFIG = {
     // same tab the Tactical floor comes from. See MIN_UNITS.TAB.
 
     RUN_HEADER: 'Run header',
+    HISTORY: 'TO history',
   },
 
   /** Header row and first data row, per §3. Lanes share these. */
@@ -276,6 +284,19 @@ var CONFIG = {
      * available-only cover is under 40 days; the top-up then aims at 42. Using
      * one number for both would keep re-triggering SKUs it had just filled.
      */
+    /**
+     * Pass 1 measures available-only cover on true_rate_30, not on
+     * order_plan_rate — that is what the sheet's own formula does
+     * (ROUNDUP((42-Y)*E/Q) with Y = K/E), and it is what reproduces the worked
+     * numbers. On 08-13, 101-1068 is 2 cases on the true rate and 5 on the
+     * order plan rate; 2 is what shipped.
+     *
+     * The 110 ceiling is still measured on order_plan_rate, because that is the
+     * cover figure the lane reports. The distinction decides real rows:
+     * 101-1062 lands on 112 DOI by the order plan rate and was held, but on 104
+     * by the true rate, which would have sent it.
+     */
+    PASS1_RATE: 'true_rate_30',  // 'true_rate_30' | 'order_plan_rate'
     PASS1_RESERVED_RATIO: 0.5,   // reserved / fulfillable must exceed this
     PASS1_TRIGGER_DOI: 40,       // available-only cover under this qualifies
     PASS1_AVAILABLE_DOI: 42,     // and the top-up aims here
@@ -335,6 +356,20 @@ var CONFIG = {
 
     /** Contention: below this FBA DOI, Tactical serves FBA before AWD (§8). */
     FBA_DOI_CONTENTION: 40,
+
+    /**
+     * Discontinued stock going Tactical > FBA is being liquidated, not
+     * replenished. Send it down, but never past 110 days of cover, and aim to
+     * stay under 50 — if even one case would cross 110, send none.
+     */
+    DISCONTINUED_MAX_FBA_DOI: 110,
+    DISCONTINUED_AIM_FBA_DOI: 50,
+
+    /**
+     * Per-SKU unit floors at FBA that exist for reasons no DOI figure knows
+     * about. 101-4001 is held at 100 units on a marketing call.
+     */
+    FBA_MIN_UNITS_BY_SKU: { '101-4001': 100 },
 
     /** Tactical>FBA floor-breach exception (§7.1). */
     FLOOR_BREACH_MAX_FBA_DOI: 30,
@@ -439,6 +474,7 @@ var CONFIG_OVERRIDABLE = [
   'RULES.PRIORITY_DOI',
   'RULES.PASS2_TRIGGER_DOI',
   'RULES.PASS1_RESERVED_RATIO',
+  'RULES.PASS1_RATE',
   'RULES.PASS1_TRIGGER_DOI',
   'RULES.PASS1_AVAILABLE_DOI',
   'RULES.MAX_FBA_DOI_AFTER',

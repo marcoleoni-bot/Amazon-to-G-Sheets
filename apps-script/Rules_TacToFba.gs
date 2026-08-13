@@ -30,14 +30,25 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
 
     // ---- quantity --------------------------------------------------------
     var t = fbaTarget(r, dss, R);
-    if (r.amzDoi >= t.target) {
+    if (!t.unitFloor && !t.liquidating && r.amzDoi >= t.target) {
       return decision(0, 'already ' + fmt(r.amzDoi) + ' DOI (target '
         + t.target + ')', { pass: 'NONE' });
     }
 
-    var cases = (t.minimumOnly || R.TAC_TO_FBA_QTY_MODE === 'single_case')
-      ? 1
-      : Math.max(1, Math.floor((t.target - r.amzDoi) * r.rate / r.caseQty));
+    var cases;
+    if (t.unitFloor) {
+      // Fill to the unit floor, rounding up — 101-4001 went 55 -> 100 as 45
+      // one-unit cases on 08-13.
+      cases = clampMin0(roundUp((t.unitFloor - r.amzTotal) / r.caseQty));
+      if (cases === 0) {
+        return decision(0, 'already ' + fmt(r.amzTotal) + ' units at FBA (floor '
+          + t.unitFloor + ')', { pass: 'NONE' });
+      }
+    } else if (t.minimumOnly || R.TAC_TO_FBA_QTY_MODE === 'single_case') {
+      cases = 1;
+    } else {
+      cases = Math.max(1, Math.floor((t.target - r.amzDoi) * r.rate / r.caseQty));
+    }
 
     // ---- gate 4: and it must not spike FBA cover -------------------------
     while (cases > 1 && resultingDoi(r, cases) > t.ceiling) cases--;
@@ -47,11 +58,13 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
         + ' DOI (>' + fmt(t.ceiling) + ')', { pass: 'NONE' });
     }
 
+    var how = t.unitFloor
+      ? 'to the ' + t.unitFloor + '-unit floor, '
+      : (t.liquidating ? 'liquidating discontinued stock, to ' : 'to ');
     var d = decision(cases, 'residual after AWD, ' + cover.why, {
       pass: 'PASS_2',
       notes: ['no inbound within 14 days',
-        (t.minimumOnly ? 'discontinued — minimum viable qty, to ' : 'to ')
-        + fmt(resultingDoi(r, cases)) + ' DOI (target ' + t.target + ')'],
+        how + fmt(resultingDoi(r, cases)) + ' DOI'],
     });
 
     // Stock cap.
@@ -87,8 +100,19 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
  * while the other two get a target with the usual single-case allowance.
  */
 function fbaTarget(r, dss, R) {
+  // A per-SKU unit floor beats every DOI rule — it exists precisely because
+  // days-of-cover is the wrong measure for that line.
+  var floorUnits = R.FBA_MIN_UNITS_BY_SKU[normSku(r.sku)]
+    || R.FBA_MIN_UNITS_BY_SKU[String(r.sku).trim()];
+  if (floorUnits > 0) {
+    return { target: doi(floorUnits, r.rate), ceiling: doi(floorUnits, r.rate),
+      minimumOnly: false, unitFloor: floorUnits };
+  }
   if (isDiscontinued(r)) {
-    return { target: R.PRIORITY_DOI, ceiling: R.PRIORITY_DOI, minimumOnly: true };
+    // Liquidating: push stock down, aim under 50 days, never past 110.
+    return { target: R.DISCONTINUED_AIM_FBA_DOI,
+      ceiling: R.DISCONTINUED_MAX_FBA_DOI, minimumOnly: false,
+      liquidating: true };
   }
   var target = (r.b2b || r.critical) ? R.PRIORITY_DOI : dss;
   return {
