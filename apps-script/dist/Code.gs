@@ -1095,10 +1095,37 @@ function planTacToAwd(rows, cfg, ltfIndex) {
 
     var d = decision(want, 'top-up AWD to ' + target + ' DOI', { pass: 'PASS_3' });
 
-    if (d.cases > r.availableCases) {
-      d.cases = clampMin0(r.availableCases);
-      addNote(d, 'capped by Tactical stock (' + r.availableCases + ' cases)');
-      addFlag(d, 'NEEDS_REVIEW');
+    // The Tactical floor, applied here and not only in the allocator.
+    //
+    // Allocate.gs still settles the *combined* draw of both Tactical lanes,
+    // which is the rule it exists for. But this lane's own limit — leave the
+    // minimum behind — belongs where the number is produced, so nothing
+    // downstream can hand back a quantity that was never allowed. On 08-19
+    // four SKUs with 100 units and a 100-unit floor went out in full because
+    // the only cap was one step further on.
+    if (r.minUnits === null || r.minUnits === undefined) {
+      return decision(0, 'Tactical floor unreadable (#REF!) — not drawing',
+        { pass: 'NONE', flags: ['NEEDS_REVIEW'] });
+    }
+
+    var drawableCases = casesIn(clampMin0(r.tacAvailableUnits - r.minUnits), r.caseQty);
+    var stockCases = Math.min(r.availableCases, drawableCases);
+
+    if (d.cases > stockCases) {
+      var wanted = d.cases;
+      d.cases = clampMin0(stockCases);
+      if (d.cases === 0 && r.minUnits > 0) {
+        d.rule = 'Tactical floor (min ' + fmt(r.minUnits) + ' units of '
+          + fmt(r.tacAvailableUnits) + ') leaves nothing to send';
+        d.notes = [];
+      } else if (drawableCases < r.availableCases) {
+        addNote(d, 'reduced from ' + wanted + ' — Tactical floor keeps '
+          + fmt(r.minUnits) + ' units back');
+        addFlag(d, 'NEEDS_REVIEW');
+      } else {
+        addNote(d, 'capped by Tactical stock (' + r.availableCases + ' cases)');
+        addFlag(d, 'NEEDS_REVIEW');
+      }
     }
     return d;
   });

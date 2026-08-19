@@ -711,3 +711,46 @@ test('the refresh preserves the columns the planner adds itself', () => {
   assert.ok(c.REFRESH.PRESERVE_COLS.TAC_TO_FBA.includes(c.COLS.TAC_TO_FBA.CRITICAL));
   assert.equal(c.REFRESH.ENABLED, true, 'step one runs by default');
 });
+
+// --------------------------------------------- the Tactical floor, per lane
+
+test('Tactical > AWD leaves the minimum behind, at the point the number is made', () => {
+  // 08-19-26, all four real. The floor had lived only in the allocator, and
+  // these went out in full: 100 units against a 100-unit floor, drawn to zero.
+  const c = cfg();
+  const rows = [
+    // nothing drawable at all
+    tacAwdRow({ sku: '101-2003', minUnits: 100, tacAvailableUnits: 100,
+      availableCases: 5, caseQty: 20, awdDoi: 38, fbaDoi: 69.6, rate: 10 }),
+    // 8 units drawable, but a case is 12 — so still nothing
+    tacAwdRow({ sku: '101-2110', minUnits: 100, tacAvailableUnits: 108,
+      availableCases: 9, caseQty: 12, awdDoi: 0, fbaDoi: 80.8, rate: 10 }),
+    // 40 drawable at 20 a case
+    tacAwdRow({ sku: '101-2103', minUnits: 100, tacAvailableUnits: 140,
+      availableCases: 7, caseQty: 20, awdDoi: 2, fbaDoi: 81, rate: 10 }),
+    // 28 drawable at 16 a case
+    tacAwdRow({ sku: '101-2104', minUnits: 100, tacAvailableUnits: 128,
+      availableCases: 8, caseQty: 16, awdDoi: 13, fbaDoi: 79.3, rate: 10 }),
+    // 12 drawable at 12 a case — the 112-unit case, one case out
+    tacAwdRow({ sku: '101-2074', minUnits: 300, tacAvailableUnits: 312,
+      availableCases: 26, caseQty: 12, awdDoi: 30, fbaDoi: 76.2, rate: 10 }),
+  ];
+  const dec = G.planTacToAwd(rows, c, {});
+  assert.deepEqual(dec.map((d) => d.cases), [0, 0, 2, 1, 1]);
+
+  rows.forEach((r, i) => {
+    assert.ok(r.tacAvailableUnits - dec[i].cases * r.caseQty >= r.minUnits,
+      `${r.sku} left ${r.tacAvailableUnits - dec[i].cases * r.caseQty} against a floor of ${r.minUnits}`);
+  });
+  assert.match(G.reasonText(dec[0], 20), /Tactical floor \(min 100 units of 100\)/);
+  assert.match(G.reasonText(dec[2], 20), /Tactical floor keeps 100 units back/);
+});
+
+test('an unreadable Tactical floor stops this lane too', () => {
+  const c = cfg();
+  const rows = [tacAwdRow({ sku: 'X', minUnits: null, tacAvailableUnits: 500,
+    availableCases: 25, caseQty: 20, awdDoi: 10, fbaDoi: 40, rate: 10 })];
+  const [d] = G.planTacToAwd(rows, c, {});
+  assert.equal(d.cases, 0);
+  assert.match(d.rule, /floor unreadable/);
+});
