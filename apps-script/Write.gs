@@ -346,6 +346,15 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
       }).join('; ')
       : input.meta.laneSource + ' (not refreshed this run)'],
     ['Tactical floor from', input.meta.minUnitsSource],
+    ['Floors that disagreed', (input.meta.floorDisagreed || []).length
+      ? input.meta.floorDisagreed.join('; ')
+      : 'none — the B2B tab and column B agree on every SKU'],
+    ['Sheet vs rules', plan.reconcile
+      ? (plan.reconcile.differed === 0
+        ? 'agree on all ' + plan.reconcile.checked + ' rows'
+        : '⚠ ' + plan.reconcile.differed + ' of ' + plan.reconcile.checked
+          + ' differ — ' + plan.reconcile.examples.join('; '))
+      : 'not compared (formulas off)'],
     ['', ''],
     ['DSS — Tactical > AWD', dssFor(cfg, 'TAC_TO_AWD')],
     ['DSS — AWD > FBA', dssFor(cfg, 'AWD_TO_FBA')],

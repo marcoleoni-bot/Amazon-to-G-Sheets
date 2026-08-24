@@ -24,6 +24,52 @@ function sheetByName(ss, name) {
   return null;
 }
 
+/**
+ * Settle the Tactical floor from its two sources.
+ *
+ *   bookValue   what the B2B tab holds for this SKU, or undefined if it does
+ *               not list it at all
+ *   cellValue   what column B of the lane shows, which is a VLOOKUP over an
+ *               IMPORTRANGE into that same tab
+ *
+ * Returns { units, unknown, disagreed, book, sheet }, where `units` is null
+ * for "cannot be read" — never zero.
+ *
+ * The **larger** wins. A floor is a minimum to hold back, so when two readings
+ * disagree the higher one is the safe direction. The workbook used to win
+ * outright whenever it listed the SKU at all, including when it listed a
+ * blank, which `num()` turns into 0. On 08-24 that emptied the floor for
+ * 101-2003, 101-2110 and 101-2104 while column B showed 100 on the row.
+ *
+ * The cost of taking the larger is that lowering a floor takes effect only
+ * once both sources agree. That is the right way round: a floor left too high
+ * holds stock back for a week, and a floor left too low ships it away.
+ */
+function resolveFloor(bookValue, cellValue) {
+  var book = (bookValue === undefined || bookValue === null || bookValue === '')
+    ? null : num(bookValue, null);
+  var sheet = isSheetError(cellValue) ? null : num(cellValue, null);
+
+  if (book === null && sheet === null) {
+    // Only an error in column B means "should have been there and wasn't". A
+    // blank means this SKU has no floor, which is true of everything outside
+    // the B2B list.
+    return isSheetError(cellValue)
+      ? { units: null, unknown: true, disagreed: false, book: null, sheet: null }
+      : { units: 0, unknown: false, disagreed: false, book: null, sheet: null };
+  }
+
+  var b = book === null ? 0 : book;
+  var s = sheet === null ? 0 : sheet;
+  return {
+    units: Math.max(b, s),
+    unknown: false,
+    disagreed: book !== null && sheet !== null && b !== s,
+    book: b,
+    sheet: s,
+  };
+}
+
 function requireSheet(ss, name, what) {
   var sh = sheetByName(ss, name);
   if (sh) return sh;
@@ -256,16 +302,32 @@ function readPlanningInput(planner, cfg) {
    * Tactical — it is what let a real run draw five SKUs down to zero units
    * against floors of 100. Unknown has to stay unknown so the lane can refuse
    * to draw rather than quietly overdraw.
+   *
+   * Two sources, and until now the workbook won outright whenever it held the
+   * SKU at all — including when it held a blank, which `num()` turns into 0.
+   * On 08-24 that is what happened to 101-2003, 101-2110 and 101-2104: column B
+   * showed 100 on the row, the run drew against a floor of nothing, and the
+   * reason it wrote ("capped by Tactical stock") is only reachable with the
+   * floor at zero. The B2B tab holds 100 for all three.
+   *
+   * So both are read and the **larger** wins. A floor is a minimum to hold
+   * back; when two readings disagree the higher one is the safe direction, and
+   * a silent zero must never beat a visible hundred. A disagreement is
+   * recorded rather than smoothed over.
    */
   var floorUnknown = [];
+  var floorDisagreed = [];
   function floorFor(sku, cellValue) {
     var k = normSku(sku);
-    if (Object.prototype.hasOwnProperty.call(minUnits.bySku, k)) return minUnits.bySku[k];
-    if (isSheetError(cellValue)) {
-      floorUnknown.push(sku);
-      return null;
+    var fromBook = Object.prototype.hasOwnProperty.call(minUnits.bySku, k)
+      ? minUnits.bySku[k] : undefined;
+    var r = resolveFloor(fromBook, cellValue);
+    if (r.units === null) floorUnknown.push(sku);
+    if (r.disagreed) {
+      floorDisagreed.push(sku + ': ' + cfg.MIN_UNITS.TAB + ' says ' + fmt(r.book)
+        + ', column B says ' + fmt(r.sheet) + ' — holding ' + fmt(r.units));
     }
-    return num(cellValue);
+    return r.units;
   }
 
   function isB2b(sku, cellValue) {
@@ -367,6 +429,7 @@ function readPlanningInput(planner, cfg) {
     meta: {
       minUnitsSource: minUnits.source,
       floorUnknown: floorUnknown,
+      floorDisagreed: floorDisagreed,
       laneSource: cfg.SOURCES.LANES_FROM === 'ims' ? 'IMS' : 'planner',
       criticalCount: Object.keys(critical).length,
       ltfCount: Object.keys(ltfIndex).length,

@@ -499,3 +499,43 @@ test('the Settings layout puts every dial on its own row', () => {
     assert.ok(plan.rows[t.row - 1], `${t.name} starts past the end of the tab`);
   });
 });
+
+// ------------------------------------------------- the floor, from two sources
+
+test('the Tactical floor takes the larger of its two sources', () => {
+  const f = (book, cell) => G.resolveFloor(book, cell);
+
+  // 08-24: the B2B tab held 100 for 101-2003, column B showed 100, and the run
+  // drew against nothing. A blank in the workbook must never win.
+  assert.equal(f('', 100).units, 100, 'a blank in the workbook loses to a visible 100');
+  assert.equal(f(0, 100).units, 100, 'and so does an explicit zero');
+  assert.equal(f(100, '').units, 100, 'a blank column B loses to the workbook');
+  assert.equal(f(100, '#REF!').units, 100, 'an unauthorised IMPORTRANGE loses too');
+
+  assert.equal(f(300, 300).units, 300, 'agreement is the ordinary case');
+  assert.equal(f(undefined, '').units, 0, 'a SKU with no floor anywhere has none');
+
+  assert.equal(f(undefined, '#REF!').units, null,
+    'but a floor that should be there and cannot be read stays unknown');
+  assert.equal(f(undefined, '#REF!').unknown, true);
+
+  const clash = f(100, 300);
+  assert.equal(clash.units, 300, 'the larger wins');
+  assert.equal(clash.disagreed, true, 'and the disagreement is recorded');
+});
+
+test('a SKU holding exactly its floor sends nothing on either implementation', () => {
+  // 101-2003 on 08-24: 100 units at Tactical, a floor of 100, cases of 20.
+  const c = cfg();
+  c.RULES.PALLET_MIN_CASES = 1;
+  const rows = harmonise('TAC_TO_AWD', [tacAwdRow({
+    sku: '101-2003', tacAvailableUnits: 100, minUnits: 100, caseQty: 20,
+    rate: 5.4, awdQty: 100, awdInbound14: 0, fbaDoi: 85,
+  })]);
+
+  const rules = G.planTacToAwd(rows, c, {}).map((d) => Math.max(0, d.cases));
+  const sheet = sheetCases(buildWorkbook(gs, c, { tacToAwd: rows }), c,
+    'TAC_TO_AWD', rows);
+  assert.deepEqual(sheet, [0]);
+  assert.deepEqual(rules, [0]);
+});

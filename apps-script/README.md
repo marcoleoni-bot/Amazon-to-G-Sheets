@@ -366,8 +366,17 @@ SPD lane moves small rescue quantities, the palletised lane waits. §8's 40-DOI
 switch still runs in `Allocate.gs`, so on the rare SKU where both lanes want
 the same stock the two can differ — and the reconciliation flags exactly that.
 
-The floor itself is read straight from the min-units workbook (§2), confirmed
-against the formula in the planner's own column B:
+It has **two sources**, and until 08-24 the workbook won outright whenever it
+listed a SKU at all — including when it listed a blank, which reads as 0. That
+is what emptied the floor for `101-2003`, `101-2110` and `101-2104` while
+column B showed 100 on the row; the reason those rows carried
+("capped by Tactical stock") is only reachable with the floor at zero. Both
+are now read and the **larger** wins, because a floor is a minimum to hold
+back and the higher reading is the safe direction. Disagreements are listed on
+`Run header` rather than smoothed over.
+
+The floor itself is read from the min-units workbook (§2), confirmed against
+the formula in the planner's own column B:
 
 ```
 =VLOOKUP(C9, IMPORTRANGE(".../14fW_-Gacy...", "B2B!A:E"), 5, 0)
