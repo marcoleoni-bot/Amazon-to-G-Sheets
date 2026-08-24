@@ -69,11 +69,20 @@ var CONFIG = {
      */
     LANES_FROM: 'planner',
 
-    /** Only needed when LANES_FROM is 'ims'. Layout must match §3. */
+    /**
+     * The IMS tabs each lane is fed from. Pinned, never guessed.
+     *
+     * All three carry the same first six headers — B2B, name, Mrkt,
+     * true_rate_30, order_plan_rate, product_life_cycle — so header matching
+     * cannot tell them apart. It picked the wrong one on 08-24 and put 491
+     * rows into a 29-row lane; every number after that was arithmetic on the
+     * wrong table. Note the planner's Tactical > AWD tab has a trailing space
+     * and the IMS one does not.
+     */
     IMS_LANE_TABS: {
-      TAC_TO_AWD: '',
-      AWD_TO_FBA: '',
-      TAC_TO_FBA: '',
+      TAC_TO_AWD: 'US TO Tactical > AWD',
+      AWD_TO_FBA: 'US TO AWD > FBA',
+      TAC_TO_FBA: 'US TO Tactical > FBA',
     },
   },
 
@@ -137,6 +146,7 @@ var CONFIG = {
 
     RUN_HEADER: 'Run header',
     HISTORY: 'TO history',
+    SETTINGS: 'Settings',
   },
 
   /** Header row and first data row, per §3. Lanes share these. */
@@ -484,6 +494,19 @@ var CONFIG = {
    * holds the previous run's numbers and the whole plan is correct arithmetic
    * on stale inputs.
    */
+  /**
+   * Which columns hold pasted values and which hold formulas.
+   *
+   * Inputs are frozen at run time — stock, rates, case sizes — so the planner
+   * stays a record of the numbers the decision was made on. Everything derived
+   * from them is a formula, so changing a rate reprices the projection in front
+   * of you instead of requiring another run.
+   */
+  FORMULAS: {
+    /** Write them on every run. Off leaves whatever is already in the sheet. */
+    ENABLED: true,
+  },
+
   REFRESH: {
     /** Do it automatically at the start of every run. */
     ENABLED: true,
@@ -1665,7 +1688,20 @@ function planUsTransferOrders(input, cfg) {
   // and a pallet, counting what could actually move left 13 and a wait.
   var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
 
-  // 5 — the pallet minimum applies to a run that is going, and only then
+  // 5 — the pallet minimum applies to a run that is going, and only then.
+  //
+  // Which means the fill can no longer add a case, and that is deliberate.
+  // decideTacToAwdRun() only raises a run once demand already reaches the
+  // minimum, and applyPalletFill() returns untouched at or above it, so the
+  // two conditions no longer overlap. Filling was the thing Marco asked to be
+  // rid of: five cases of genuine need padded with twenty of SKUs that needed
+  // nothing, purely to fill a pallet.
+  //
+  // It is left wired up rather than deleted because §6.1 asks for it and a
+  // different verdict rule would want it back. Nothing in the sheet formulas
+  // implements it, so if it ever does fire again the reconciliation will
+  // report every filled row as a disagreement — which is the right way to
+  // find out.
   var pallet = tacAwdVerdict.raise
     ? applyPalletFill(input.tacToAwd, tacAwdDec, cfg, alloc.headroomUnits, ltf)
     : {
@@ -2140,6 +2176,1061 @@ function readPlanningInput(planner, cfg) {
 }
 
 // ========================================================================
+// Settings.gs
+// ========================================================================
+
+/**
+ * The dials, on a tab, as named ranges.
+ *
+ * Until now every threshold lived in Config.gs and reached the sheet only as a
+ * number already applied — 75 days of AWD cover became "3 cases" and the 75
+ * disappeared. Changing it meant editing code and running again.
+ *
+ * Here the numbers live in one visible place and the lane formulas reference
+ * them by name. Change `TacAwd_TargetDoi` from 75 to 90 and the whole Tactical
+ * > AWD column reprices in front of you. Nothing is recomputed in the
+ * background, and nothing has to be re-run to see the effect.
+ *
+ * Config.gs stays the default: the tab is built from it the first time, and
+ * read back into the running config after that, so the script and the sheet
+ * always work from the same set of numbers.
+ */
+
+/**
+ * The names the lane formulas use.
+ *
+ * One map, referenced by both sides, so a rename cannot leave a formula
+ * pointing at a name that no longer exists — which shows up as #NAME? in 491
+ * cells and nowhere else.
+ */
+var SETTINGS_NAMES = {
+  DSS: 'Dss_BaselineDoi',
+  PRIORITY_DOI: 'Priority_Doi',
+
+  TAC_AWD_GATE_AWD: 'TacAwd_GateAwdDoi',
+  TAC_AWD_GATE_FBA: 'TacAwd_GateFbaDoi',
+  TAC_AWD_TARGET: 'TacAwd_TargetDoi',
+  PALLET_MIN: 'Pallet_MinCases',
+
+  AWD_FBA_RESERVED_RATIO: 'AwdFba_ReservedRatio',
+  AWD_FBA_PASS1_TRIGGER: 'AwdFba_Pass1TriggerDoi',
+  AWD_FBA_PASS1_TARGET: 'AwdFba_Pass1TargetDoi',
+  AWD_FBA_PASS2_TRIGGER: 'AwdFba_Pass2TriggerDoi',
+  AWD_FBA_MAX_AFTER: 'AwdFba_MaxDoiAfter',
+  AWD_FBA_REVIEW_ABOVE: 'AwdFba_ReviewAboveCases',
+
+  TAC_FBA_SPIKE: 'TacFba_SpikeMultiplier',
+  TAC_FBA_DISC_AIM: 'TacFba_DiscontinuedAimDoi',
+  TAC_FBA_DISC_MAX: 'TacFba_DiscontinuedMaxDoi',
+  TAC_FBA_BREACH_MAX: 'TacFba_FloorBreachMaxDoi',
+  TAC_FBA_BREACH_RESTORE: 'TacFba_FloorBreachRestoreDoi',
+  TAC_FBA_BREACH_TOLERANCE: 'TacFba_FloorBreachTolerance',
+
+  PASS1_RATE: 'Pass1_Rate',
+  CONTENTION_FBA_DOI: 'Contention_FbaDoi',
+
+  FBA_MIN_UNITS: 'Fba_MinUnitsBySku',
+
+  RUN_TAC_AWD_QUALIFYING: 'Run_TacAwdQualifyingCases',
+  RUN_TAC_AWD_VERDICT: 'Run_TacAwdVerdict',
+};
+
+/**
+ * Named range -> the Config path it mirrors.
+ *
+ * `kind` is what the cell holds:
+ *   'number'  a plain number
+ *   'text'    a string dial (PASS1_RATE)
+ *   'table'   a two-column lookup, read into an object
+ *   'formula' derived on the tab itself; never read back into config
+ */
+var SETTINGS_DIALS = [
+  { section: 'Everywhere' },
+  { name: 'Dss_BaselineDoi', path: 'RULES.DSS', kind: 'number',
+    label: 'Baseline days of stock (DSS)',
+    note: 'The target every ordinary SKU is topped up to.' },
+  { name: 'Priority_Doi', path: 'RULES.PRIORITY_DOI', kind: 'number',
+    label: 'B2B / Critical target (DOI)',
+    note: 'Priority SKUs aim here instead of the baseline.' },
+
+  { section: 'Tactical > AWD' },
+  { name: 'TacAwd_GateAwdDoi', path: 'RULES.TAC_TO_AWD_GATE_AWD_DOI', kind: 'number',
+    label: 'Only if AWD cover is under (DOI)',
+    note: 'Above this, AWD has enough and the row is skipped.' },
+  { name: 'TacAwd_GateFbaDoi', path: 'RULES.TAC_TO_AWD_GATE_FBA_DOI', kind: 'number',
+    label: '...and FBA cover is under (DOI)',
+    note: 'Both ends must be short. Thin at AWD with FBA comfortable is not a '
+      + 'reason to move a pallet.' },
+  { name: 'TacAwd_TargetDoi', path: 'RULES.TAC_TO_AWD_TARGET_DOI', kind: 'number',
+    label: 'Top AWD up to (DOI)',
+    note: 'The quantity is whatever it takes to reach this.' },
+  { name: 'Pallet_MinCases', path: 'RULES.PALLET_MIN_CASES', kind: 'number',
+    label: 'Pallet minimum (cases)',
+    note: 'The lane ships palletised. Under this the whole run holds for a '
+      + 'later one rather than padding with SKUs that do not need anything.' },
+
+  { section: 'AWD > FBA' },
+  { name: 'AwdFba_ReservedRatio', path: 'RULES.PASS1_RESERVED_RATIO', kind: 'number',
+    label: 'Pass 1 — reserved / fulfillable above',
+    note: 'How blocked by reservations the FBA stock has to be.' },
+  { name: 'AwdFba_Pass1TriggerDoi', path: 'RULES.PASS1_TRIGGER_DOI', kind: 'number',
+    label: 'Pass 1 — available-only cover under (DOI)',
+    note: 'Measured on the rate named below, not on order_plan_rate.' },
+  { name: 'AwdFba_Pass1TargetDoi', path: 'RULES.PASS1_AVAILABLE_DOI', kind: 'number',
+    label: 'Pass 1 — top available-only up to (DOI)',
+    note: 'Deliberately above the trigger, or filled rows re-trigger.' },
+  { name: 'AwdFba_Pass2TriggerDoi', path: 'RULES.PASS2_TRIGGER_DOI', kind: 'number',
+    label: 'Pass 2 — B2B / Critical fires under (DOI)',
+    note: 'A priority SKU already above this is left alone.' },
+  { name: 'AwdFba_MaxDoiAfter', path: 'RULES.MAX_FBA_DOI_AFTER', kind: 'number',
+    label: 'Never leave FBA above (DOI)',
+    note: 'Cases come off until total FBA cover after the transfer fits.' },
+  { name: 'AwdFba_ReviewAboveCases', path: 'RULES.REVIEW_ABOVE_CASES', kind: 'number',
+    label: 'Flag for review above (cases)',
+    note: 'Proposed, but marked worth a second look.' },
+
+  { section: 'Tactical > FBA' },
+  { name: 'TacFba_SpikeMultiplier', path: 'RULES.TAC_TO_FBA_SPIKE_MULTIPLIER', kind: 'number',
+    label: 'A case may overshoot the target by',
+    note: '1.1 means a target of 100 tolerates a landing at 110.' },
+  { name: 'TacFba_DiscontinuedAimDoi', path: 'RULES.DISCONTINUED_AIM_FBA_DOI', kind: 'number',
+    label: 'Discontinued — aim for (DOI)',
+    note: 'Liquidating, so push stock down towards this.' },
+  { name: 'TacFba_DiscontinuedMaxDoi', path: 'RULES.DISCONTINUED_MAX_FBA_DOI', kind: 'number',
+    label: 'Discontinued — never exceed (DOI)',
+    note: 'If even one case crosses this, send none.' },
+  { name: 'TacFba_FloorBreachMaxDoi', path: 'RULES.FLOOR_BREACH_MAX_FBA_DOI', kind: 'number',
+    label: 'Tactical floor may be broken under (FBA DOI)',
+    note: 'Only here, only when AWD is empty, and only because this lane ships '
+      + 'SPD. Tactical > AWD is palletised and may never break it.' },
+  { name: 'TacFba_FloorBreachRestoreDoi', path: 'RULES.FLOOR_BREACH_RESTORE_DOI', kind: 'number',
+    label: '...and only to restore cover to about (DOI)',
+    note: 'Breaking the floor is a rescue, not a top-up. If the transfer would '
+      + 'not land near here it is not a rescue and the floor holds.' },
+  { name: 'TacFba_FloorBreachTolerance', path: 'RULES.FLOOR_BREACH_RESTORE_TOLERANCE', kind: 'number',
+    label: '...give or take',
+    note: '0.25 means anywhere from 45 to 75 days counts as restoring 60.' },
+
+  { section: 'Rates' },
+  { name: 'Pass1_Rate', path: 'RULES.PASS1_RATE', kind: 'text',
+    label: 'Pass 1 measures cover on',
+    note: 'true_rate_30 or order_plan_rate. On 08-13 the two differ by three '
+      + 'cases on 101-1068; true_rate_30 is what shipped.' },
+  { name: 'Contention_FbaDoi', path: 'RULES.FBA_DOI_CONTENTION', kind: 'number',
+    label: 'Below this FBA cover, Tactical serves FBA first',
+    note: 'Both Tactical lanes draw on one pool. In the sheet, Tactical > FBA '
+      + 'is always settled first and its units come off the Tactical > AWD '
+      + 'budget — see the README.' },
+];
+
+/** Two-column tables that live below the dials. */
+var SETTINGS_TABLES = [
+  {
+    name: 'Fba_MinUnitsBySku',
+    path: 'RULES.FBA_MIN_UNITS_BY_SKU',
+    title: 'Minimum units to hold at FBA, by SKU',
+    headers: ['SKU', 'Units'],
+    note: 'Beats every DOI rule. 101-4001 is held at 100 units on a marketing '
+      + 'call, and no days-of-cover figure knows that.',
+    minRows: 12,
+  },
+];
+
+/** Cells the tab derives for itself, and the lane formulas read back. */
+var SETTINGS_RUN_CELLS = [
+  {
+    name: 'Run_TacAwdQualifyingCases',
+    label: 'Tactical > AWD — cases that qualify',
+    formula: function (cfg) {
+      var col = colLetter(laneWorkColumns(cfg, 'TAC_TO_AWD').QUALIFY);
+      return '=SUM(' + quoteTab(cfg.TABS.TAC_TO_AWD) + '!'
+        + col + cfg.LAYOUT.LANE_FIRST_DATA_ROW + ':' + col + ')';
+    },
+    note: 'Demand before the pallet test, summed straight off the lane.',
+  },
+  {
+    name: 'Run_TacAwdVerdict',
+    label: 'Tactical > AWD — raise this run?',
+    formula: function () {
+      return '=IF(' + SETTINGS_NAMES.RUN_TAC_AWD_QUALIFYING + '>='
+        + SETTINGS_NAMES.PALLET_MIN + ',"RAISE","HOLD")';
+    },
+    note: 'HOLD zeroes the whole lane. Raise the pallet minimum and watch the '
+      + 'column empty; lower it and watch it fill.',
+  },
+];
+
+// ------------------------------------------------------------------- building
+
+/**
+ * Create or rebuild the Settings tab and its named ranges.
+ *
+ * Values already on the tab are kept — that is the whole point, since Marco
+ * edits them. Only labels, notes and layout are rewritten, so a renamed dial
+ * or a new one appears without wiping the numbers next to the old ones.
+ */
+function ensureSettings(planner, cfg) {
+  var ss = planner || SpreadsheetApp.getActiveSpreadsheet();
+  // The run cells name a lane tab inside a formula, so they need the
+  // workbook's own spelling rather than the configured one.
+  var conf = resolveTabNames(ss, cfg || config());
+  var name = conf.TABS.SETTINGS;
+
+  var sh = sheetByName(ss, name);
+  if (!sh) sh = ss.insertSheet(name);
+  if (!isGridSheet(sh)) {
+    throw new Error('"' + name + '" is a Connected Sheet; the planner needs an '
+      + 'ordinary tab there.');
+  }
+
+  var existing = readSettingsCells(sh);
+  var plan = layoutSettings(conf);
+
+  var width = 3;
+  if (sh.getMaxColumns() < width) sh.insertColumnsAfter(sh.getMaxColumns(), width - sh.getMaxColumns());
+  if (sh.getMaxRows() < plan.rows.length) {
+    sh.insertRowsAfter(sh.getMaxRows(), plan.rows.length - sh.getMaxRows());
+  }
+
+  // Keep whatever the sheet already held for a dial; fall back to Config.
+  plan.dials.forEach(function (d) {
+    if (d.kind === 'formula') return;
+    var was = existing[d.name];
+    if (was !== undefined && was !== null && was !== '') {
+      plan.rows[d.row - 1][1] = was;
+    }
+  });
+  plan.tables.forEach(function (t) {
+    var was = existing['@' + t.name];
+    if (!was || !was.length) return;
+    for (var i = 0; i < t.height && i < was.length; i++) {
+      plan.rows[t.row - 1 + i][0] = was[i][0];
+      plan.rows[t.row - 1 + i][1] = was[i][1];
+    }
+  });
+
+  sh.getRange(1, 1, plan.rows.length, width).clearContent();
+  sh.getRange(1, 1, plan.rows.length, width).setValues(plan.rows);
+
+  // The derived cells go in last, as formulas rather than values.
+  plan.dials.forEach(function (d) {
+    if (d.kind !== 'formula') return;
+    sh.getRange(d.row, 2).setFormula(d.formula(conf));
+  });
+
+  styleSettings(sh, plan, conf);
+  nameSettingsRanges(ss, sh, plan);
+
+  return { sheet: sh, dials: plan.dials.length, tables: plan.tables.length };
+}
+
+/**
+ * Where every row goes. Pure — no sheet involved — so the layout is testable
+ * and the named ranges cannot drift from what was written.
+ */
+function layoutSettings(cfg) {
+  var rows = [];
+  var dials = [];
+  var tables = [];
+
+  function push(a, b, c) { rows.push([a, b === undefined ? '' : b, c || '']); return rows.length; }
+
+  push('US transfer order planner — settings', '', '');
+  push('Edit a value in column B and every lane recalculates. Nothing here is '
+    + 'overwritten by a run.', '', '');
+  push('', '', '');
+  push('Setting', 'Value', 'What it changes');
+
+  SETTINGS_DIALS.forEach(function (d) {
+    if (d.section) { push('', '', ''); push(d.section, '', ''); return; }
+    var row = push(d.label, getByPath_(cfg, d.path), d.note);
+    dials.push({ name: d.name, path: d.path, kind: d.kind, row: row });
+  });
+
+  push('', '', '');
+  push('This run', '', '');
+  SETTINGS_RUN_CELLS.forEach(function (c) {
+    var row = push(c.label, '', c.note);
+    dials.push({ name: c.name, kind: 'formula', row: row, formula: c.formula });
+  });
+
+  SETTINGS_TABLES.forEach(function (t) {
+    push('', '', '');
+    push(t.title, '', t.note);
+    push(t.headers[0], t.headers[1], '');
+    var entries = Object.keys(getByPath_(cfg, t.path) || {}).map(function (k) {
+      return [k, getByPath_(cfg, t.path)[k]];
+    });
+    var height = Math.max(t.minRows, entries.length + 4);
+    var first = rows.length + 1;
+    for (var i = 0; i < height; i++) {
+      push(entries[i] ? entries[i][0] : '', entries[i] ? entries[i][1] : '', '');
+    }
+    tables.push({ name: t.name, path: t.path, row: first, height: height });
+  });
+
+  push('', '', '');
+  push('Defaults live in Config.gs. Clearing a value here restores the default '
+    + 'on the next run.', '', '');
+
+  return { rows: rows, dials: dials, tables: tables };
+}
+
+function styleSettings(sh, plan, cfg) {
+  var width = 3;
+  sh.getRange(1, 1, 1, width).setFontWeight('bold').setFontSize(13);
+  sh.getRange(2, 1, 1, width).setFontStyle('italic').setFontColor('#666666');
+  sh.getRange(4, 1, 1, width).setFontWeight('bold').setBackground(cfg.COLOURS.HEADER);
+
+  // Section rows: the ones with a label and nothing beside it.
+  var bold = [];
+  plan.rows.forEach(function (r, i) {
+    if (i < 4) return;
+    if (r[0] && r[1] === '' && r[2] === '') bold.push(i + 1);
+  });
+  bold.forEach(function (r) {
+    sh.getRange(r, 1, 1, width).setFontWeight('bold').setBackground('#f3f3f3');
+  });
+
+  plan.dials.forEach(function (d) {
+    var cell = sh.getRange(d.row, 2);
+    cell.setBackground(d.kind === 'formula' ? '#efefef' : '#fff2cc');
+    if (d.kind === 'formula') cell.setFontWeight('bold');
+  });
+  plan.tables.forEach(function (t) {
+    sh.getRange(t.row, 1, t.height, 2).setBackground('#fff2cc');
+  });
+
+  sh.setColumnWidth(1, 320);
+  sh.setColumnWidth(2, 110);
+  sh.setColumnWidth(3, 620);
+  sh.getRange(1, 3, plan.rows.length, 1).setWrap(true);
+  sh.setFrozenRows(4);
+}
+
+/** Point each name at its cell, replacing any older definition. */
+function nameSettingsRanges(ss, sh, plan) {
+  var wanted = {};
+  plan.dials.forEach(function (d) { wanted[d.name] = sh.getRange(d.row, 2); });
+  plan.tables.forEach(function (t) {
+    wanted[t.name] = sh.getRange(t.row, 1, t.height, 2);
+  });
+
+  ss.getNamedRanges().forEach(function (nr) {
+    if (wanted[nr.getName()]) nr.remove();
+  });
+  Object.keys(wanted).forEach(function (name) {
+    ss.setNamedRange(name, wanted[name]);
+  });
+}
+
+// -------------------------------------------------------------------- reading
+
+/** Whatever is currently sitting in each named cell, by name. */
+function readSettingsCells(sh) {
+  var out = {};
+  var ss = sh.getParent();
+  ss.getNamedRanges().forEach(function (nr) {
+    var rng = nr.getRange();
+    if (rng.getSheet().getSheetId() !== sh.getSheetId()) return;
+    try {
+      if (rng.getNumRows() === 1 && rng.getNumColumns() === 1) {
+        // A derived cell holds a formula; its value is not a setting.
+        if (rng.getFormula()) return;
+        out[nr.getName()] = rng.getValue();
+      } else {
+        out['@' + nr.getName()] = rng.getValues();
+      }
+    } catch (e) { /* a name pointing at a deleted range */ }
+  });
+  return out;
+}
+
+/**
+ * Config with the Settings tab applied on top.
+ *
+ * This is what makes the tab real rather than decorative: the rule engine and
+ * the sheet formulas both end up working from the numbers in column B, so a
+ * dial changed there moves both at once and they cannot disagree.
+ *
+ * Script Properties still win over Config defaults; the tab wins over both,
+ * because it is the one a human can see.
+ */
+function configFor(planner, base) {
+  var cfg = base || config();
+  var ss = planner;
+  if (!ss) {
+    try { ss = SpreadsheetApp.getActiveSpreadsheet(); } catch (e) { return cfg; }
+  }
+  var sh = sheetByName(ss, cfg.TABS.SETTINGS);
+  if (!sh || !isGridSheet(sh)) return cfg;
+
+  var cells = readSettingsCells(sh);
+  var byName = {};
+  SETTINGS_DIALS.forEach(function (d) { if (d.name) byName[d.name] = d; });
+
+  Object.keys(byName).forEach(function (name) {
+    var d = byName[name];
+    var v = cells[name];
+    if (v === undefined || v === null || v === '') return;
+    if (d.kind === 'number') {
+      var n = Number(v);
+      if (!isFinite(n)) return;
+      setByPath(cfg, d.path, n);
+    } else {
+      setByPath(cfg, d.path, String(v).trim());
+    }
+  });
+
+  SETTINGS_TABLES.forEach(function (t) {
+    var grid = cells['@' + t.name];
+    if (!grid) return;
+    var map = {};
+    grid.forEach(function (row) {
+      var k = normSku(row[0]);
+      var n = Number(row[1]);
+      if (k && isFinite(n) && n > 0) map[k] = n;
+    });
+    // An empty table means "no per-SKU floors", which is a real answer.
+    setByPath(cfg, t.path, map);
+  });
+
+  cfg.SETTINGS_APPLIED = true;
+  return cfg;
+}
+
+// ========================================================================
+// Formulas.gs
+// ========================================================================
+
+/**
+ * The lanes, as formulas.
+ *
+ * Every bug this planner has had has been the same bug: a number worked out
+ * somewhere else and pasted in, where a failed input silently became zero. A
+ * floor that read #REF! became no floor. A rate that failed to load became no
+ * demand. The arithmetic was always right and the answer was always wrong, and
+ * nothing on the sheet showed which.
+ *
+ * So the split is: **inputs are values, everything derived is a formula**.
+ *
+ *   pasted as values   stock, rates, case sizes, lifecycle, the Tactical floor
+ *                      — frozen at run time, so the planner stays a record of
+ *                      the numbers the decision was actually made on
+ *
+ *   live formulas      days of cover, cases to transfer, units, cover after
+ *                      the transfer — all of it visible, all of it referencing
+ *                      the dials on the Settings tab by name
+ *
+ * Change the rate in column F and the projection moves in front of you. Change
+ * `TacAwd_TargetDoi` on the Settings tab from 75 to 90 and the whole column
+ * reprices. Nothing has to be re-run to see the effect of a what-if, which is
+ * the thing pasted values make impossible.
+ *
+ * The rule engine in Rules_*.gs still runs, and still writes the reason for
+ * every row. After the formulas settle, the two are compared: where they
+ * disagree the sheet's number wins — it is the one Marco can see — and the row
+ * is flagged. Drift between the two becomes loud instead of silent.
+ */
+
+// ------------------------------------------------------------ tiny formula DSL
+
+function quoteTab(name) {
+  return "'" + String(name).replace(/'/g, "''") + "'";
+}
+
+/** `$H8`. Column locked, row free, so a column can be filled without drift. */
+function cellRef(col0, row) {
+  return '$' + colLetter(col0) + row;
+}
+
+/** The cell as a number: blanks and text read as 0 rather than poisoning the row. */
+function numRef(col0, row) {
+  return 'N(' + cellRef(col0, row) + ')';
+}
+
+/** A VLOOKUP into another lane, keyed on its SKU column. Misses read as 0. */
+function laneLookup(cfg, laneKey, keyCol0, valueCol0, keyExpr) {
+  return 'IFERROR(VLOOKUP(' + keyExpr + ',' + quoteTab(cfg.TABS[laneKey]) + '!$'
+    + colLetter(keyCol0) + ':$' + colLetter(valueCol0) + ','
+    + (valueCol0 - keyCol0 + 1) + ',FALSE),0)';
+}
+
+/**
+ * Whether a flag cell means yes.
+ *
+ * Spelled out rather than using an array literal, because `{"TRUE";"YES"}`
+ * needs a different separator in a non-US locale and would break silently on a
+ * sheet opened somewhere else.
+ */
+function truthyRef(col0, row) {
+  var s = 'UPPER(TRIM(' + cellRef(col0, row) + '&""))';
+  return 'OR(' + s + '="TRUE",' + s + '="YES",' + s + '="Y",' + s + '="T",'
+    + s + '="1")';
+}
+
+function isDiscontinuedRef(col0, row) {
+  return 'LOWER(TRIM(' + cellRef(col0, row) + '&""))="discontinued"';
+}
+
+/** `IF(a, b, c)` written so the nesting stays readable in source. */
+function iff(cond, then, other) {
+  return 'IF(' + cond + ',' + then + ',' + other + ')';
+}
+
+/** Days of cover, blank when there is no rate — 0 would read as an emergency. */
+function doiFormula(rateCol, parts, row) {
+  var sum = parts.map(function (c) { return numRef(c, row); }).join('+');
+  return '=' + iff(numRef(rateCol, row) + '>0',
+    '(' + sum + ')/' + numRef(rateCol, row), '""');
+}
+
+// -------------------------------------------------------------- work columns
+
+/**
+ * The columns the formulas add to the right of Reason.
+ *
+ * They exist to be read. The Tactical floor kept turning into "the script says
+ * 1 case and I cannot see why"; `Drawable after the Tactical floor` puts the
+ * number the floor actually allows on the row, next to the number being sent.
+ */
+function laneWorkColumns(cfg, laneKey) {
+  var base = cfg.COLS[laneKey].REASON + 1;
+  if (laneKey === 'TAC_TO_AWD') return { DRAWABLE: base, QUALIFY: base + 1 };
+  if (laneKey === 'AWD_TO_FBA') {
+    return { PASS: base, TARGET: base + 1, NEEDED: base + 2, UNCOVERED: base + 3 };
+  }
+  return { TARGET: base, CEILING: base + 1, RESIDUAL: base + 2,
+    WANTED: base + 3, PROPOSED: base + 4 };
+}
+
+function laneWorkHeaders(laneKey) {
+  if (laneKey === 'TAC_TO_AWD') {
+    return ['Drawable after the Tactical floor (cases)',
+      'Qualifying cases (before the pallet test)'];
+  }
+  if (laneKey === 'AWD_TO_FBA') {
+    return ['Pass (1 reserved-blocked · 2 B2B/Critical · 3 baseline)',
+      'Target (DOI)', 'Cases needed to reach the target',
+      'Cases AWD could not cover'];
+  }
+  return ['Target (DOI)', 'Ceiling (DOI)', 'Cases AWD could not cover',
+    'Wanted, before the ceiling (cases)',
+    'Wanted, before Tactical stock and the floor (cases)'];
+}
+
+// ------------------------------------------------------ lane: Tactical > AWD
+
+/**
+ * Returns { columnIndex: formula } for one row.
+ *
+ * Pure: no sheet, no I/O, so every formula this planner writes is testable as
+ * a string before it ever reaches a cell.
+ */
+function formulasTacToAwd(row, cfg) {
+  var C = cfg.COLS.TAC_TO_AWD;
+  var W = laneWorkColumns(cfg, 'TAC_TO_AWD');
+  var f = {};
+
+  var rate = numRef(C.ORDER_PLAN_RATE, row);
+  var cq = numRef(C.CASE_QTY, row);
+
+  f[C.AVAILABLE_CASES] = '=' + iff(cq + '>0',
+    'FLOOR(' + numRef(C.TAC_AVAILABLE, row) + '/' + cq + ')', '""');
+
+  f[C.AWD_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.AWD_QTY, C.AWD_INBOUND_14], row);
+  f[C.TOTAL_DOI] = doiFormula(C.ORDER_PLAN_RATE,
+    [C.TAC_AVAILABLE, C.AWD_QTY, C.AWD_INBOUND_14], row);
+  f[C.AWD_DOI_AFTER] = doiFormula(C.ORDER_PLAN_RATE,
+    [C.AWD_QTY, C.AWD_INBOUND_14, C.UNITS_OUT], row);
+
+  f[C.UNITS_OUT] = '=' + numRef(C.CASES_OUT, row) + '*' + cq;
+
+  // What the floor leaves, in cases — after Tactical > FBA has taken its share.
+  //
+  // Both Tactical lanes draw on one pool and the sheet cannot resolve that
+  // circularly, so Tactical > FBA is settled first and its units come off this
+  // lane's budget. That is the direction Marco takes by hand: the SPD lane
+  // moves small rescue quantities, the palletised lane waits.
+  var takenByFba = laneLookup(cfg, 'TAC_TO_FBA', cfg.COLS.TAC_TO_FBA.NAME,
+    cfg.COLS.TAC_TO_FBA.UNITS_OUT, cellRef(C.NAME, row));
+
+  f[W.DRAWABLE] = '=' + iff(cq + '<=0', '0',
+    iff('ISERROR(' + cellRef(C.MIN_UNITS, row) + ')', '0',
+      'FLOOR(MAX(0,' + numRef(C.TAC_AVAILABLE, row) + '-'
+        + numRef(C.MIN_UNITS, row) + '-' + takenByFba + ')/' + cq + ')'));
+
+  // Qualifying demand, before the pallet test. Short at BOTH ends or nothing:
+  // thin at AWD while FBA is comfortable is not a reason to move a pallet.
+  var want = 'ROUNDUP((' + SETTINGS_NAMES.TAC_AWD_TARGET + '-'
+    + numRef(C.AWD_DOI, row) + ')*' + rate + '/' + cq + ',0)';
+
+  f[W.QUALIFY] = '='
+    + iff(cellRef(C.NAME, row) + '=""', '""',
+      iff(isDiscontinuedRef(C.LIFECYCLE, row), '0',
+        iff(rate + '<=0', '0',
+          iff(cq + '<=0', '0',
+            // An unreadable FBA figure is not zero cover. Read as zero it looks
+            // like the most desperate row on the tab and walks straight through
+            // a gate meant to keep it out.
+            iff('NOT(ISNUMBER(' + cellRef(C.FBA_DOI, row) + '))', '0',
+              iff(numRef(C.AWD_DOI, row) + '>=' + SETTINGS_NAMES.TAC_AWD_GATE_AWD, '0',
+                iff(numRef(C.FBA_DOI, row) + '>=' + SETTINGS_NAMES.TAC_AWD_GATE_FBA, '0',
+                  'MAX(0,MIN(' + want + ',' + numRef(C.AVAILABLE_CASES, row)
+                    + ',' + numRef(W.DRAWABLE, row) + '))')))))));
+
+  // The pallet test is a property of the run, not of the row, so it lives in
+  // one cell on Settings and every row reads the same answer.
+  f[C.CASES_OUT] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
+    iff(SETTINGS_NAMES.RUN_TAC_AWD_VERDICT + '="RAISE"',
+      numRef(W.QUALIFY, row), '0'));
+
+  return f;
+}
+
+// ---------------------------------------------------------- lane: AWD > FBA
+
+function formulasAwdToFba(row, cfg) {
+  var C = cfg.COLS.AWD_TO_FBA;
+  var W = laneWorkColumns(cfg, 'AWD_TO_FBA');
+  var f = {};
+
+  var rate = numRef(C.ORDER_PLAN_RATE, row);
+  var cq = numRef(C.CASE_QTY, row);
+
+  // Pass 1 measures cover on true_rate_30, falling back to the order plan rate
+  // when there isn't one. On 08-13 that is the difference between 2 cases and
+  // 5 on 101-1068; 2 is what shipped.
+  var p1rate = cfg.RULES.PASS1_RATE === 'order_plan_rate'
+    ? rate
+    : iff(numRef(C.TRUE_RATE_30, row) + '>0', numRef(C.TRUE_RATE_30, row), rate);
+
+  f[C.AVAILABLE_CASES] = '=' + iff(cq + '>0',
+    'FLOOR(' + numRef(C.AWD_AVAILABLE, row) + '/' + cq + ')', '""');
+  f[C.AWD_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.AWD_AVAILABLE], row);
+  f[C.AMZ_TOTAL] = '=' + [C.AMZ_FULFILLABLE, C.AMZ_RESERVED, C.AMZ_INBOUND]
+    .map(function (c) { return numRef(c, row); }).join('+');
+  f[C.AMZ_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.AMZ_TOTAL], row);
+  f[C.UNITS_OUT] = '=' + numRef(C.CASES_OUT, row) + '*' + cq;
+  f[C.TOTAL_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.AWD_AVAILABLE, C.AMZ_TOTAL], row);
+  f[C.AMZ_DOI_AFTER] = doiFormula(C.ORDER_PLAN_RATE, [C.AMZ_TOTAL, C.UNITS_OUT], row);
+
+  // X — reserved against fulfillable. All reserved and none fulfillable is not
+  // a ratio of zero; it is the most blocked a SKU can be.
+  f[C.RESERVED_RATIO] = '=' + iff(numRef(C.AMZ_FULFILLABLE, row) + '>0',
+    numRef(C.AMZ_RESERVED, row) + '/' + numRef(C.AMZ_FULFILLABLE, row),
+    iff(numRef(C.AMZ_RESERVED, row) + '>0', '"all reserved"', '0'));
+
+  // Y — days of cover on fulfillable stock alone, on the pass-1 rate, so the
+  // sheet shows the number the rule actually reads.
+  f[C.AVAILABLE_ONLY_DOI] = '=' + iff(p1rate + '>0',
+    numRef(C.AMZ_FULFILLABLE, row) + '/' + p1rate, '""');
+
+  var ratio = iff(numRef(C.AMZ_FULFILLABLE, row) + '>0',
+    numRef(C.AMZ_RESERVED, row) + '/' + numRef(C.AMZ_FULFILLABLE, row),
+    iff(numRef(C.AMZ_RESERVED, row) + '>0', '1E+99', '0'));
+
+  var priority = 'OR(' + truthyRef(C.B2B, row) + ',' + truthyRef(C.CRITICAL, row) + ')';
+
+  f[W.PASS] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
+    iff(rate + '<=0', '0',
+      iff('AND(' + ratio + '>' + SETTINGS_NAMES.AWD_FBA_RESERVED_RATIO + ','
+        + numRef(C.AVAILABLE_ONLY_DOI, row) + '<'
+        + SETTINGS_NAMES.AWD_FBA_PASS1_TRIGGER + ')', '1',
+        iff('AND(' + priority + ',' + numRef(C.AMZ_DOI, row) + '<'
+          + SETTINGS_NAMES.AWD_FBA_PASS2_TRIGGER + ')', '2', '3'))));
+
+  // The one ceiling every pass respects: total FBA cover after the transfer.
+  var ceiling = 'MAX(0,FLOOR((' + SETTINGS_NAMES.AWD_FBA_MAX_AFTER + '*' + rate
+    + '-' + numRef(C.AMZ_TOTAL, row) + ')/' + cq + '))';
+
+  var p1 = 'MIN(MAX(0,ROUNDUP((' + SETTINGS_NAMES.AWD_FBA_PASS1_TARGET + '-'
+    + numRef(C.AVAILABLE_ONLY_DOI, row) + ')*' + p1rate + '/' + cq + ',0)),'
+    + ceiling + ')';
+
+  var p2 = 'MAX(0,ROUNDUP((' + SETTINGS_NAMES.PRIORITY_DOI + '-'
+    + numRef(C.AMZ_DOI, row) + ')*' + rate + '/' + cq + ',0))';
+
+  // The sheet's own IFS ladder, in its order — including the quirk that a
+  // destination sitting exactly on target yields one case rather than none.
+  var dss = SETTINGS_NAMES.DSS;
+  var gap = '(' + dss + '-' + numRef(C.AMZ_DOI, row) + ')';
+  var ladder = iff(numRef(C.AWD_DOI, row) + '+' + numRef(C.AMZ_DOI, row) + '<' + dss,
+    numRef(C.AVAILABLE_CASES, row),
+    iff(gap + '<0', '0',
+      iff(gap + '*' + rate + '<' + cq, '1',
+        iff(gap + '>0', 'ROUNDUP(' + gap + '*' + rate + '/' + cq + ',0)', '0'))));
+  var p3 = 'MIN(' + ladder + ',' + ceiling + ')';
+
+  f[C.CASES_OUT] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
+    iff(rate + '<=0', '0',
+      iff(cq + '<=0', '0',
+        'MAX(0,MIN(' + numRef(C.AVAILABLE_CASES, row) + ','
+          + iff(numRef(W.PASS, row) + '=1', p1,
+            iff(numRef(W.PASS, row) + '=2', p2, p3)) + '))')));
+
+  // What this lane leaves on the table, and whether AWD stock is the reason.
+  //
+  // That distinction is the whole gate for Tactical > FBA. Hitting the 110
+  // ceiling or a priority target is a decision, not a shortage, and must not
+  // open the residual lane; running AWD dry is exactly a shortage.
+  //
+  // Split across three columns rather than nested into one, because a formula
+  // nobody can read is no more visible than a pasted value — and "what is this
+  // SKU aiming at" and "how far short is it" are worth seeing on the row.
+  f[W.TARGET] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
+    iff(priority, SETTINGS_NAMES.PRIORITY_DOI, dss));
+
+  f[W.NEEDED] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
+    iff('OR(' + rate + '<=0,' + cq + '<=0)', '0',
+      'MAX(0,ROUNDUP((' + numRef(W.TARGET, row) + '-' + numRef(C.AMZ_DOI, row)
+        + ')*' + rate + '/' + cq + ',0))'));
+
+  var short = 'MAX(0,' + numRef(W.NEEDED, row) + '-' + numRef(C.CASES_OUT, row) + ')';
+  var freeUnits = 'MAX(0,' + numRef(C.AWD_AVAILABLE, row) + '-'
+    + numRef(C.UNITS_OUT, row) + ')';
+
+  f[W.UNCOVERED] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
+    iff('OR(' + rate + '<=0,' + cq + '<=0)', '0',
+      iff('AND(' + short + '>0,' + freeUnits + '<' + short + '*' + cq + ')',
+        short, '0')));
+
+  return f;
+}
+
+// ------------------------------------------------------ lane: Tactical > FBA
+
+function formulasTacToFba(row, cfg) {
+  var C = cfg.COLS.TAC_TO_FBA;
+  var A = cfg.COLS.AWD_TO_FBA;
+  var AW = laneWorkColumns(cfg, 'AWD_TO_FBA');
+  var W = laneWorkColumns(cfg, 'TAC_TO_FBA');
+  var f = {};
+
+  var rate = numRef(C.ORDER_PLAN_RATE, row);
+  var cq = numRef(C.CASE_QTY, row);
+  var sku = cellRef(C.NAME, row);
+
+  f[C.AVAILABLE_CASES] = '=' + iff(cq + '>0',
+    'FLOOR(' + numRef(C.TAC_AVAILABLE, row) + '/' + cq + ')', '""');
+  f[C.TAC_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.TAC_AVAILABLE], row);
+  f[C.AMZ_TOTAL] = '=' + [C.AMZ_FULFILLABLE, C.AMZ_RESERVED, C.AMZ_INBOUND]
+    .map(function (c) { return numRef(c, row); }).join('+');
+  f[C.AMZ_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.AMZ_TOTAL], row);
+  f[C.UNITS_OUT] = '=' + numRef(C.CASES_OUT, row) + '*' + cq;
+  f[C.TOTAL_DOI] = doiFormula(C.ORDER_PLAN_RATE, [C.TAC_AVAILABLE, C.AMZ_TOTAL], row);
+  f[C.AMZ_DOI_AFTER] = doiFormula(C.ORDER_PLAN_RATE, [C.AMZ_TOTAL, C.UNITS_OUT], row);
+
+  // What the AWD > FBA lane is sending this run, so the residual test is
+  // visible on the row rather than implied by it.
+  f[C.TO_AWD_TO_FBA] = '=' + laneLookup(cfg, 'AWD_TO_FBA', A.NAME, A.UNITS_OUT, sku);
+
+  var floorUnits = 'IFERROR(VLOOKUP(' + sku + ',' + SETTINGS_NAMES.FBA_MIN_UNITS
+    + ',2,FALSE),0)';
+  var disc = isDiscontinuedRef(C.LIFECYCLE, row);
+  var priority = 'OR(' + truthyRef(C.B2B, row) + ',' + truthyRef(C.CRITICAL, row) + ')';
+
+  // A per-SKU unit floor beats every DOI rule — it exists precisely because
+  // days-of-cover is the wrong measure for that line. 101-4001 is held at 100
+  // units on a marketing call.
+  f[W.TARGET] = '=' + iff(rate + '<=0', '""',
+    iff(floorUnits + '>0', floorUnits + '/' + rate,
+      iff(disc, SETTINGS_NAMES.TAC_FBA_DISC_AIM,
+        iff(priority, SETTINGS_NAMES.PRIORITY_DOI, SETTINGS_NAMES.DSS))));
+
+  f[W.CEILING] = '=' + iff(rate + '<=0', '""',
+    iff(floorUnits + '>0', floorUnits + '/' + rate,
+      iff(disc, SETTINGS_NAMES.TAC_FBA_DISC_MAX,
+        numRef(W.TARGET, row) + '*' + SETTINGS_NAMES.TAC_FBA_SPIKE)));
+
+  // Gate 1 — strictly residual. The lane opens only where AWD wanted to send
+  // more and ran out of stock, or where the SKU has no AWD stock at all.
+  var uncovered = laneLookup(cfg, 'AWD_TO_FBA', A.NAME, AW.UNCOVERED, sku);
+  f[W.RESIDUAL] = '=' + iff(sku + '=""', '""',
+    iff('ISNA(MATCH(' + sku + ',' + quoteTab(cfg.TABS.AWD_TO_FBA) + '!$'
+      + colLetter(A.NAME) + ':$' + colLetter(A.NAME) + ',0))',
+      iff(numRef(C.AWD_AVAILABLE, row) + '<=0', '9999', '0'),
+      uncovered));
+
+  // Gate 2 — nothing already on its way into AWD inside 14 days.
+  var inbound = laneLookup(cfg, 'TAC_TO_AWD', cfg.COLS.TAC_TO_AWD.NAME,
+    cfg.COLS.TAC_TO_AWD.AWD_INBOUND_14, sku);
+
+  var amzDoi = numRef(C.AMZ_DOI, row);
+  var target = numRef(W.TARGET, row);
+  var ceiling = numRef(W.CEILING, row);
+
+  var toFloor = 'MAX(0,ROUNDUP((' + floorUnits + '-' + numRef(C.AMZ_TOTAL, row)
+    + ')/' + cq + ',0))';
+  // Liquidating: push stock down towards the aim, whatever the cover says.
+  var toAim = 'MAX(1,FLOOR((' + target + '-' + amzDoi + ')*' + rate + '/' + cq + '))';
+  var toTarget = iff(amzDoi + '>=' + target, '0', toAim);
+
+  f[W.WANTED] = '=' + iff(sku + '=""', '""',
+    iff('OR(' + rate + '<=0,' + cq + '<=0)', '0',
+      iff(floorUnits + '>0', toFloor, iff(disc, toAim, toTarget))));
+
+  // Gate 4 — and it must not spike FBA cover. One case is allowed to overshoot
+  // the target; nothing is allowed to cross the ceiling.
+  var raw = numRef(W.WANTED, row);
+  var fits = 'FLOOR((' + ceiling + '*' + rate + '-' + numRef(C.AMZ_TOTAL, row)
+    + ')/' + cq + ')';
+  var afterSpike = iff(raw + '<=0', '0', iff(fits + '>=1', 'MIN(' + raw + ',' + fits + ')', '0'));
+
+  // What the row wants once the gates and the ceiling have had their say, but
+  // before Tactical stock and the floor do. Kept as its own column because it
+  // is the number the floor-breach test reads, and because "wanted 20, sending
+  // 10" is the question the reason column keeps being asked.
+  f[W.PROPOSED] = '=' + iff(sku + '=""', '""',
+    iff('OR(' + rate + '<=0,' + cq + '<=0)', '0',
+      iff(numRef(W.RESIDUAL, row) + '<=0', '0',
+        iff(inbound + '>0', '0', 'MAX(0,' + afterSpike + ')'))));
+
+  var proposed = numRef(W.PROPOSED, row);
+
+  // §7.1 — the Tactical floor may be broken, but only on this lane, only when
+  // AWD is empty, FBA is genuinely thin, and the transfer restores cover to
+  // roughly the baseline. A rescue, not a top-up. And only because this lane
+  // ships SPD: Tactical > AWD is palletised and may never break it.
+  var restored = '(' + numRef(C.AMZ_TOTAL, row) + '+' + proposed + '*' + cq
+    + ')/' + rate;
+  var lo = '(' + SETTINGS_NAMES.TAC_FBA_BREACH_RESTORE + '*(1-'
+    + SETTINGS_NAMES.TAC_FBA_BREACH_TOLERANCE + '))';
+  var hi = '(' + SETTINGS_NAMES.TAC_FBA_BREACH_RESTORE + '*(1+'
+    + SETTINGS_NAMES.TAC_FBA_BREACH_TOLERANCE + '))';
+  var breach = 'AND(' + numRef(C.AWD_AVAILABLE, row) + '<=0,'
+    + amzDoi + '<' + SETTINGS_NAMES.TAC_FBA_BREACH_MAX + ','
+    + restored + '>=' + lo + ',' + restored + '<=' + hi + ')';
+
+  var floorCap = 'FLOOR(MAX(0,' + numRef(C.TAC_AVAILABLE, row) + '-'
+    + numRef(C.MIN_UNITS, row) + ')/' + cq + ')';
+  var stockCapped = 'MIN(' + proposed + ',' + numRef(C.AVAILABLE_CASES, row) + ')';
+
+  f[C.CASES_OUT] = '=' + iff(sku + '=""', '""',
+    iff(proposed + '<=0', '0',
+      iff(breach, stockCapped,
+        iff('ISERROR(' + cellRef(C.MIN_UNITS, row) + ')', '0',
+          'MAX(0,MIN(' + stockCapped + ',' + floorCap + '))'))));
+
+  return f;
+}
+
+// ----------------------------------------------------------------- writing
+
+var LANE_FORMULA_BUILDERS = {
+  TAC_TO_AWD: formulasTacToAwd,
+  AWD_TO_FBA: formulasAwdToFba,
+  TAC_TO_FBA: formulasTacToFba,
+};
+
+/**
+ * Write one lane's derived columns.
+ *
+ * `rowCount` rows starting at the first data row. Formulas go in column by
+ * column — one setFormulas() per column rather than per cell, which is the
+ * difference between a run that finishes and one that times out on 491 rows.
+ */
+function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
+  if (!sheet || rowCount <= 0) return { lane: laneKey, ok: false, note: 'no rows' };
+  if (!isGridSheet(sheet)) {
+    return { lane: laneKey, ok: false, note: 'Connected Sheet — cannot write formulas' };
+  }
+
+  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  var build = LANE_FORMULA_BUILDERS[laneKey];
+  var work = laneWorkColumns(cfg, laneKey);
+
+  var widest = cfg.COLS[laneKey].REASON;
+  Object.keys(work).forEach(function (k) { widest = Math.max(widest, work[k]); });
+  ensureColumns(sheet, widest + 1);
+
+  // Build the whole block first, so a bad column index throws before anything
+  // is written rather than half way through.
+  var byColumn = {};
+  for (var i = 0; i < rowCount; i++) {
+    var f = build(first + i, cfg);
+    Object.keys(f).forEach(function (col) {
+      if (!byColumn[col]) byColumn[col] = [];
+      byColumn[col].push([f[col]]);
+    });
+  }
+
+  Object.keys(byColumn).forEach(function (col) {
+    sheet.getRange(first, Number(col) + 1, rowCount, 1).setFormulas(byColumn[col]);
+  });
+
+  // Anything below the SKUs is a previous run's tail. Leaving it there is how
+  // a 29-row lane keeps reporting 491 rows of arithmetic on nothing.
+  var tail = sheet.getLastRow() - (first + rowCount) + 1;
+  if (tail > 0) {
+    sheet.getRange(first + rowCount, 1, tail, sheet.getMaxColumns()).clearContent();
+  }
+
+  writeWorkHeaders(sheet, laneKey, cfg);
+  return { lane: laneKey, ok: true, rows: rowCount, columns: Object.keys(byColumn).length };
+}
+
+/**
+ * How many data rows each lane actually has, counted on the SKU column.
+ *
+ * Not getLastRow(): a previous run's formulas can sit hundreds of rows below
+ * the last SKU, and taking the sheet's word for it is what let 491 rows of
+ * decisions accumulate on a lane with 29 products.
+ */
+function laneRowCounts(planner, cfg) {
+  var out = {};
+  ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].forEach(function (k) {
+    var sh = sheetByName(planner, cfg.TABS[k]);
+    out[k] = sh && isGridSheet(sh) ? laneRowCount(sh, k, cfg) : 0;
+  });
+  return out;
+}
+
+function laneRowCount(sheet, laneKey, cfg) {
+  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  var last = sheet.getLastRow();
+  if (last < first) return 0;
+  var vals = sheet.getRange(first, cfg.COLS[laneKey].NAME + 1, last - first + 1, 1)
+    .getValues();
+  for (var i = vals.length - 1; i >= 0; i--) {
+    if (String(vals[i][0] === null || vals[i][0] === undefined ? '' : vals[i][0]).trim()) {
+      return i + 1;
+    }
+  }
+  return 0;
+}
+
+function writeWorkHeaders(sheet, laneKey, cfg) {
+  var work = laneWorkColumns(cfg, laneKey);
+  var headers = laneWorkHeaders(laneKey);
+  var cols = Object.keys(work).map(function (k) { return work[k]; })
+    .sort(function (a, b) { return a - b; });
+  cols.forEach(function (c, i) {
+    var cell = sheet.getRange(cfg.LAYOUT.LANE_HEADER_ROW, c + 1);
+    cell.setValue(headers[i]);
+    cell.setBackground(cfg.COLOURS.HEADER);
+    cell.setFontWeight('bold');
+    cell.setWrap(true);
+  });
+}
+
+/**
+ * Config with every tab name replaced by the workbook's actual spelling.
+ *
+ * `sheetByName()` trims and lower-cases before matching, so the script has
+ * always found the right tab whatever the spelling. A formula cannot: the name
+ * is embedded in the string, and one character out makes every cross-lane
+ * lookup #REF!. The Tactical > AWD tab really is called "US TO Tactical > AWD "
+ * with a trailing space, and nothing about that is going to stay true forever.
+ *
+ * So the names are resolved once, from the file, before a single formula is
+ * built.
+ */
+function resolveTabNames(planner, cfg) {
+  var out = JSON.parse(JSON.stringify(cfg));
+  Object.keys(out.TABS).forEach(function (key) {
+    var sh = sheetByName(planner, out.TABS[key]);
+    if (sh) out.TABS[key] = sh.getName();
+  });
+  return out;
+}
+
+/**
+ * All three lanes, in dependency order.
+ *
+ * AWD > FBA first because Tactical > FBA is residual to it, and Tactical > FBA
+ * before Tactical > AWD because its units come off the same Tactical pool. The
+ * order does not matter to Sheets, which resolves the graph itself — it
+ * matters to anyone reading this and wondering whether it can loop. It cannot:
+ * each lane only ever looks upstream.
+ */
+function writeAllFormulas(planner, rowCounts, cfg) {
+  return ['AWD_TO_FBA', 'TAC_TO_FBA', 'TAC_TO_AWD'].map(function (k) {
+    return writeLaneFormulas(sheetByName(planner, cfg.TABS[k]), k,
+      rowCounts[k] || 0, cfg);
+  });
+}
+
+/**
+ * Read back what the sheet worked out, per lane, as cases.
+ * Returns [] when the lane is missing rather than throwing — the caller has a
+ * better error to give than this one does.
+ */
+function readLaneCases(sheet, rowCount, laneKey, cfg) {
+  if (!sheet || rowCount <= 0) return [];
+  var col = cfg.COLS[laneKey].CASES_OUT + 1;
+  var vals = sheet.getRange(cfg.LAYOUT.LANE_FIRST_DATA_ROW, col, rowCount, 1)
+    .getValues();
+  return vals.map(function (r) { return num(r[0], 0); });
+}
+
+// --------------------------------------------------------- keeping them honest
+
+/**
+ * Settle the sheet's numbers against the rule engine's.
+ *
+ * Two implementations of the same rules will drift. The answer is not to hope
+ * they don't — it is to compare them on every run and make a disagreement
+ * impossible to miss.
+ *
+ * Where they differ, **the sheet wins**: it is the number on the row, the one
+ * that gets picked and shipped, and the one Marco can trace back through its
+ * own arguments. The rule engine's answer is kept as a note on the row so the
+ * difference is legible rather than merely flagged.
+ *
+ * Everything downstream — reasons, summary tabs, CSV tabs, the history log —
+ * then reads one number, so the workbook cannot contradict itself.
+ *
+ * Returns { checked, differed, examples } for the run header.
+ */
+function reconcileWithSheet(input, plan, cfg) {
+  var lanes = [
+    { key: 'TAC_TO_AWD', rows: input.tacToAwd, dec: plan.tacToAwd, sheet: input.sheets.tacToAwd },
+    { key: 'AWD_TO_FBA', rows: input.awdToFba, dec: plan.awdToFba, sheet: input.sheets.awdToFba },
+    { key: 'TAC_TO_FBA', rows: input.tacToFba, dec: plan.tacToFba, sheet: input.sheets.tacToFba },
+  ];
+
+  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  var out = { checked: 0, differed: 0, examples: [] };
+
+  lanes.forEach(function (lane) {
+    if (!lane.sheet || !lane.rows.length) return;
+    var span = lane.rows[lane.rows.length - 1].rowIndex - first + 1;
+    var sheetCases = readLaneCases(lane.sheet, span, lane.key, cfg);
+
+    lane.rows.forEach(function (r, i) {
+      var d = lane.dec[i];
+      if (!d) return;
+      var was = d.cases > 0 ? d.cases : 0;
+      var now = Math.max(0, Math.round(sheetCases[r.rowIndex - first] || 0));
+      out.checked++;
+      if (now === was) return;
+
+      out.differed++;
+      if (out.examples.length < 5) {
+        out.examples.push(lane.key + ' ' + r.sku + ': sheet ' + now
+          + ', rules ' + was);
+      }
+      d.cases = now;
+      addNote(d, 'sheet formula gives ' + now + ' where the rule engine gave '
+        + was + ' — the sheet is what ships; check the Settings tab');
+      addFlag(d, 'NEEDS_REVIEW');
+    });
+  });
+
+  // The totals were computed from the pre-reconciliation numbers.
+  plan.totals.tacToAwdCases = sumCases(plan.tacToAwd);
+  plan.totals.awdToFbaCases = sumCases(plan.awdToFba);
+  plan.totals.tacToFbaCases = sumCases(plan.tacToFba);
+  plan.totals.needsReview = countFlag(plan.tacToAwd, 'NEEDS_REVIEW')
+    + countFlag(plan.awdToFba, 'NEEDS_REVIEW')
+    + countFlag(plan.tacToFba, 'NEEDS_REVIEW');
+  plan.reconcile = out;
+
+  return out;
+}
+
+// ========================================================================
 // Write.gs
 // ========================================================================
 
@@ -2164,7 +3255,9 @@ function writePlan(planner, input, plan, cfg, ctx) {
   tintLaneUrgency(input.sheets.awdToFba, input.awdToFba, cfg.COLS.AWD_TO_FBA.AMZ_DOI, cfg);
   tintLaneUrgency(input.sheets.tacToFba, input.tacToFba, cfg.COLS.TAC_TO_FBA.AMZ_DOI, cfg);
 
-  if (cfg.OUTPUT.WRITE_RECOMPUTED_Y) {
+  // Column Y is a formula when the formula layer is on, and writing a value
+  // over it would strand the number pass 1 reads at whatever it was this run.
+  if (cfg.OUTPUT.WRITE_RECOMPUTED_Y && !cfg.FORMULAS.ENABLED) {
     writeAvailableOnlyDoi(input.sheets.awdToFba, input.awdToFba, cfg);
   }
   if (cfg.OUTPUT.WRITE_SUMMARIES) {
@@ -2214,8 +3307,14 @@ function writeLane(sheet, rows, decisions, C, cfg, reasonHeader) {
     fills[at][0] = colourFor(d, cfg);
   });
 
-  sheet.getRange(first, C.CASES_OUT + 1, span, 1).setValues(cases);
-  sheet.getRange(first, C.UNITS_OUT + 1, span, 1).setFormulas(units);
+  // With formulas on, the quantity and the units belong to the sheet. Writing
+  // a value over the formula would replace the live calculation with a dead
+  // number the moment the reasons are written — the exact thing the formula
+  // layer exists to stop.
+  if (!cfg.FORMULAS.ENABLED) {
+    sheet.getRange(first, C.CASES_OUT + 1, span, 1).setValues(cases);
+    sheet.getRange(first, C.UNITS_OUT + 1, span, 1).setFormulas(units);
+  }
 
   var reasonRange = sheet.getRange(first, C.REASON + 1, span, 1);
   reasonRange.setValues(reason);
@@ -2898,18 +3997,24 @@ function authoriseDataSourcesMenu() {
 // ========================================================================
 
 /**
- * Step one of the manual process, which the script had been skipping: pull the
- * current numbers out of the IMS and paste them into the planner as values.
+ * Step one of the manual process: pull the current numbers out of the IMS and
+ * paste them into the planner as values.
  *
  * Without this the planner is a copy of the last run and the lanes still hold
  * the last run's data. Everything downstream is then correct arithmetic on
  * stale inputs, which is the most expensive kind of wrong — it looks fine.
  *
- * Two things are deliberate:
+ * Three things are deliberate:
  *
  *  - Values, not formulas. The planner is a record of what was decided and the
- *    numbers behind it; a live formula would rewrite that record every time
+ *    numbers behind it; a live IMPORTRANGE would rewrite that record every time
  *    the IMS moves, and a back-test against it would measure nothing.
+ *
+ *  - Only inputs. Days of cover, cases to transfer and cover after the transfer
+ *    are formulas in the planner (see Formulas.gs). Pasting the IMS's own
+ *    versions over them would replace the live calculation with a dead number
+ *    and undo the entire point of the exercise. The list of columns to skip is
+ *    taken from the formula builders themselves, so the two cannot disagree.
  *
  *  - Locally-added columns survive. The Tactical minimum in column B is not in
  *    the IMS — it is looked up from the B2B tab and Marco keeps it visible on
@@ -2918,51 +4023,30 @@ function authoriseDataSourcesMenu() {
  */
 
 /**
- * Find the IMS tab that feeds a lane.
+ * The IMS tab that feeds a lane. Pinned, never guessed.
  *
- * Prefers the configured name, then matches on the header row itself. Matching
- * on headers rather than names means a renamed tab still resolves, and a tab
- * that has been restructured fails loudly instead of pasting the wrong columns
- * into the right ones.
+ * There used to be a header-matching fallback here. It cannot work: all three
+ * IMS lane tabs open with the same six headers — B2B, name, Mrkt,
+ * true_rate_30, order_plan_rate, product_life_cycle — so every one of them
+ * scores the same against every lane. On 08-24 it picked `US TO AWD > FBA` for
+ * the Tactical > AWD lane and pasted 491 rows into a tab with 29, and every
+ * number after that was correct arithmetic on the wrong table.
+ *
+ * A pinned name that is missing fails loudly, which is the only safe way for
+ * this to go wrong.
  */
-function findImsLaneTab(ims, plannerSheet, configuredName, cfg) {
-  if (configuredName) {
-    var named = sheetByName(ims, configuredName);
-    if (named) return { sheet: named, how: 'configured name' };
+function findImsLaneTab(ims, laneKey, cfg) {
+  var name = (cfg.SOURCES.IMS_LANE_TABS || {})[laneKey];
+  if (!name) {
+    return { sheet: null, how: 'no IMS tab configured — set SOURCES.IMS_LANE_TABS.'
+      + laneKey + ' in Config.gs' };
   }
-
-  var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
-  var want = plannerSheet.getRange(headerRow, 1, 1, plannerSheet.getLastColumn())
-    .getValues()[0].map(headerKey).filter(String);
-  if (!want.length) return { sheet: null, how: 'planner has no header row' };
-
-  var best = null;
-  ims.getSheets().forEach(function (sh) {
-    // A Connected Sheet throws rather than returning a header, so it can never
-    // be a source and must not be probed.
-    if (!isGridSheet(sh)) return;
-    if (sh.getLastRow() < headerRow || sh.getLastColumn() < 1) return;
-    var got;
-    try {
-      got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
-        .getValues()[0].map(headerKey);
-    } catch (e) {
-      return; // unreadable for any other reason — not a candidate
-    }
-    var hits = 0;
-    want.forEach(function (h) { if (got.indexOf(h) !== -1) hits++; });
-    var score = hits / want.length;
-    if (!best || score > best.score) best = { sheet: sh, score: score };
-  });
-
-  if (best && best.score >= cfg.REFRESH.HEADER_MATCH_MIN) {
-    return { sheet: best.sheet, how: 'header match ' + Math.round(100 * best.score) + '%' };
+  var sh = sheetByName(ims, name);
+  if (!sh) {
+    return { sheet: null, how: 'the IMS has no tab named "' + name
+      + '" — check SOURCES.IMS_LANE_TABS.' + laneKey };
   }
-  return {
-    sheet: null,
-    how: 'no IMS tab matched the header (best '
-      + (best ? Math.round(100 * best.score) + '%' : 'none') + ')',
-  };
+  return { sheet: sh, how: 'configured name "' + name + '"' };
 }
 
 function headerKey(v) {
@@ -2970,8 +4054,20 @@ function headerKey(v) {
     .replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/** Column indexes the lane's formulas own, so the refresh leaves them alone. */
+function formulaColumns(laneKey, cfg) {
+  var build = LANE_FORMULA_BUILDERS[laneKey];
+  if (!build) return [];
+  var owned = Object.keys(build(cfg.LAYOUT.LANE_FIRST_DATA_ROW, cfg))
+    .map(Number);
+  var work = laneWorkColumns(cfg, laneKey);
+  Object.keys(work).forEach(function (k) { owned.push(work[k]); });
+  owned.push(cfg.COLS[laneKey].REASON);
+  return owned;
+}
+
 /**
- * Copy one lane's values across, column by column, honouring the preserve list.
+ * Copy one lane's input values across, column by column.
  *
  * Columns are matched by header, not by position: the IMS and the planner do
  * not have to agree on layout, and a column that has moved on one side lands
@@ -2987,8 +4083,7 @@ function refreshLane(ims, planner, laneKey, cfg) {
       note: 'the planner tab is a Connected Sheet — the script cannot write to it' };
   }
 
-  var found = findImsLaneTab(ims, plannerSheet,
-    cfg.SOURCES.IMS_LANE_TABS[laneKey], cfg);
+  var found = findImsLaneTab(ims, laneKey, cfg);
   if (!found.sheet) return { lane: tabName, ok: false, note: found.how };
   if (!isGridSheet(found.sheet)) {
     return { lane: tabName, ok: false, note: '"' + found.sheet.getName()
@@ -3009,13 +4104,16 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var srcRows = srcLast - firstRow + 1;
   var srcValues = src.getRange(firstRow, 1, srcRows, src.getLastColumn()).getValues();
 
-  var preserve = (cfg.REFRESH.PRESERVE_COLS[laneKey] || []).slice();
+  var skip = (cfg.REFRESH.PRESERVE_COLS[laneKey] || []).slice();
+  var derived = cfg.FORMULAS.ENABLED ? formulaColumns(laneKey, cfg) : [];
+  derived.forEach(function (c) { if (skip.indexOf(c) === -1) skip.push(c); });
+
   var copied = [];
   var skipped = [];
 
   for (var d = 0; d < dstHeader.length; d++) {
     if (!dstHeader[d]) continue;
-    if (preserve.indexOf(d) !== -1) { skipped.push(d); continue; }
+    if (skip.indexOf(d) !== -1) { skipped.push(d); continue; }
     var s = srcHeader.indexOf(dstHeader[d]);
     if (s === -1) continue;               // planner-only column: leave it alone
 
@@ -3030,7 +4128,7 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var dstLast = plannerSheet.getLastRow();
   if (dstLast > srcLast) {
     plannerSheet.getRange(srcLast + 1, 1, dstLast - srcLast,
-      plannerSheet.getLastColumn()).clearContent();
+      plannerSheet.getMaxColumns()).clearContent();
   }
 
   return {
@@ -3043,9 +4141,32 @@ function refreshLane(ims, planner, laneKey, cfg) {
 function refreshLanesFromIms(planner, cfg) {
   var conf = cfg || config();
   var ims = SpreadsheetApp.openById(conf.SOURCES.IMS_ID);
+
+  var pinned = conf.SOURCES.IMS_LANE_TABS || {};
+  var clash = duplicateLaneTabs(pinned);
+  if (clash) {
+    throw new Error('Two lanes are pinned to the same IMS tab ("' + clash
+      + '"). All three IMS lane tabs share the same headers, so this is exactly'
+      + ' the mistake that puts one lane\'s rows into another. Fix'
+      + ' SOURCES.IMS_LANE_TABS in Config.gs.');
+  }
+
   return ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].map(function (k) {
     return refreshLane(ims, planner, k, conf);
   });
+}
+
+/** The tab name two lanes share, or null. */
+function duplicateLaneTabs(pinned) {
+  var seen = {};
+  var keys = ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'];
+  for (var i = 0; i < keys.length; i++) {
+    var name = pinned[keys[i]];
+    if (!name) continue;
+    if (seen[name]) return name;
+    seen[name] = true;
+  }
+  return null;
 }
 
 function refreshLanesMenu() {
@@ -3053,15 +4174,16 @@ function refreshLanesMenu() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var answer = ui.alert('Refresh from the IMS?',
     'The three lane tabs in "' + ss.getName() + '" will be overwritten with '
-    + 'current values from the Inventory Monitoring Sheet.\n\nColumns the '
-    + 'planner adds itself — the Tactical minimum in column B — are left alone.',
+    + 'current values from the Inventory Monitoring Sheet.\n\nOnly input '
+    + 'columns are touched. The calculated columns stay as formulas, and the '
+    + 'Tactical minimum in column B is left alone.',
     ui.ButtonSet.OK_CANCEL);
   if (answer !== ui.Button.OK) return null;
 
-  var out = refreshLanesFromIms(ss, config());
+  var out = refreshLanesFromIms(ss, configFor(ss));
   var lines = out.map(function (r) {
     return (r.ok ? '✓ ' + r.lane + ' — ' + r.rows + ' rows from "' + r.from
-      + '" (' + r.how + '), ' + r.copied + ' columns, ' + r.preserved + ' preserved'
+      + '", ' + r.copied + ' input columns, ' + r.preserved + ' left as formulas'
       : '✗ ' + r.lane + ' — ' + r.note);
   });
   ui.alert('Refreshed from the IMS', lines.join('\n\n'), ui.ButtonSet.OK);
@@ -3425,24 +4547,62 @@ function historyScorecardMenu() {
  * forward to be cleared or, worse, not cleared.
  */
 
+/**
+ * Four items and a drawer.
+ *
+ * There were ten, in three groups, and picking the wrong one was easy and
+ * expensive. On an ordinary Thursday only the first is needed: it makes the
+ * dated copy, pulls the IMS, rebuilds the formulas and decides all three
+ * lanes. The second is for after a dial has been changed on the Settings tab.
+ * Everything else is a tool, and tools go in a drawer.
+ */
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('Transfer Orders')
-    .addItem('Build US plan', 'buildPlan')
-    .addItem('Build US plan in this file', 'buildPlanHere')
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('Transfer Orders')
+    .addItem('▶  Build this week\'s plan', 'buildPlan')
+    .addItem('↻  Re-plan this file', 'buildPlanHere')
     .addSeparator()
-    .addItem('Dry run (report only, writes nothing)', 'dryRun')
-    .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
-    .addItem('Refresh lanes from the IMS', 'refreshLanesMenu')
-    .addSeparator()
-    .addItem('Record what shipped (after raising the orders)', 'recordShippedMenu')
-    .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
-    .addItem('Back-fill history from past planners…', 'backfillHistoryMenu')
-    .addItem('Back-test this file against its own numbers', 'backtestThisFile')
-    .addItem('Back-test another planner…', 'backtestPrompt')
-    .addSeparator()
-    .addItem('Show settings', 'showSettings')
+    .addItem('Open the Settings tab', 'openSettings')
+    .addItem('Record what shipped', 'recordShippedMenu')
+    .addSubMenu(ui.createMenu('Tools')
+      .addItem('Dry run — decide, write nothing', 'dryRun')
+      .addItem('Refresh the lanes from the IMS', 'refreshLanesMenu')
+      .addItem('Rebuild the formulas', 'rebuildFormulasMenu')
+      .addItem('Authorise data sources', 'authoriseDataSourcesMenu')
+      .addSeparator()
+      .addItem('Scorecard — proposal vs shipment', 'historyScorecardMenu')
+      .addItem('Back-fill history from past planners…', 'backfillHistoryMenu')
+      .addItem('Back-test this file', 'backtestThisFile')
+      .addItem('Back-test another planner…', 'backtestPrompt')
+      .addSeparator()
+      .addItem('Settings in force (script view)', 'showSettings'))
     .addToUi();
+}
+
+/** Jump to the dials rather than hunting for the tab. */
+function openSettings() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cfg = config();
+  var sh = sheetByName(ss, cfg.TABS.SETTINGS);
+  if (!sh) sh = ensureSettings(ss, cfg).sheet;
+  ss.setActiveSheet(sh);
+  return sh;
+}
+
+/** Rewrite the derived columns without touching the pasted inputs. */
+function rebuildFormulasMenu() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var cfg = config();
+  ensureSettings(ss, cfg);
+  var out = writeAllFormulas(ss, laneRowCounts(ss, cfg),
+    resolveTabNames(ss, configFor(ss, cfg)));
+  SpreadsheetApp.flush();
+  SpreadsheetApp.getUi().alert('Formulas rebuilt',
+    out.map(function (r) {
+      return r.ok ? '✓ ' + r.lane + ' — ' + r.rows + ' rows, ' + r.columns
+        + ' calculated columns' : '✗ ' + r.lane + ' — ' + r.note;
+    }).join('\n'), SpreadsheetApp.getUi().ButtonSet.OK);
+  return out;
 }
 
 /** Copy the template into the dated folder, then plan into the copy. */
@@ -3460,9 +4620,11 @@ function buildPlanHere() {
   var cfg = config();
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var ui = SpreadsheetApp.getUi();
-  var answer = ui.alert('Build the plan in "' + ss.getName() + '"?',
-    'Decision columns, reasons, summary and CSV tabs in this file will be '
-    + 'overwritten.', ui.ButtonSet.OK_CANCEL);
+  var answer = ui.alert('Re-plan "' + ss.getName() + '"?',
+    'The lanes are refreshed from the IMS, the calculated columns are rebuilt '
+    + 'as formulas, and the reasons, summary and CSV tabs are regenerated.\n\n'
+    + 'Any quantity typed over a formula by hand will be replaced.',
+    ui.ButtonSet.OK_CANCEL);
   if (answer !== ui.Button.OK) return null;
 
   var result = runPlan(ss, cfg, { snapshot: 'live, in place' });
@@ -3478,6 +4640,8 @@ function dryRun() {
   // The refresh runs here too. A dry run against last week's numbers tells you
   // nothing about this week, and the refresh touches inputs, not decisions.
   authoriseDataSources(ss, cfg);
+  ensureSettings(ss, cfg);
+  cfg = configFor(ss, cfg);
   var refreshed = cfg.REFRESH.ENABLED ? refreshLanesFromIms(ss, cfg) : null;
   if (refreshed) SpreadsheetApp.flush();
 
@@ -3504,11 +4668,28 @@ function dryRun() {
   return plan;
 }
 
-/** Read, decide, write. The one path both menu items share. */
+/**
+ * Read, decide, write. The one path both menu items share.
+ *
+ * The order matters and is the manual process, in the manual order:
+ *
+ *   1. authorise, so nothing reads #REF! where a floor should be
+ *   2. the Settings tab, because the formulas reference it by name
+ *   3. the IMS, pasted in as values — the frozen record of this run's inputs
+ *   4. the formulas, which turn those inputs into cover, cases and units
+ *   5. read what the sheet worked out, and run the same rules over it
+ *   6. reconcile: where the two differ, the sheet wins and the row is flagged
+ *   7. reasons, colours, summaries, CSV, history
+ */
 function runPlan(planner, cfg, ctx) {
   // Clear the IMPORTRANGE grants before reading, so a fresh copy does not plan
   // against a sheet full of #REF!.
   authoriseDataSources(planner, cfg);
+
+  // The dials, on a tab, as named ranges the lane formulas can reference —
+  // and read back, so the rule engine works from the same numbers.
+  ensureSettings(planner, cfg);
+  cfg = configFor(planner, cfg);
 
   // Step one of the manual process: current values out of the IMS, pasted in.
   // Skipping it means planning against the previous run's numbers.
@@ -3519,14 +4700,29 @@ function runPlan(planner, cfg, ctx) {
     if (failed.length === refreshed.length) {
       throw new Error('Could not refresh any lane from the IMS:\n  '
         + failed.map(function (r) { return r.lane + ' — ' + r.note; }).join('\n  ')
-        + '\n\nSet SOURCES.IMS_LANE_TABS if the tabs cannot be matched by header.');
+        + '\n\nCheck SOURCES.IMS_LANE_TABS in Config.gs against the IMS tab names.');
     }
+    SpreadsheetApp.flush();
+  }
+
+  // Everything derived, as formulas over those values. Tab names are resolved
+  // from the file first: the script matches them loosely, a formula cannot.
+  var formulas = null;
+  if (cfg.FORMULAS.ENABLED) {
+    formulas = writeAllFormulas(planner, laneRowCounts(planner, cfg),
+      resolveTabNames(planner, cfg));
     SpreadsheetApp.flush();
   }
 
   var input = readPlanningInput(planner, cfg);
   input.meta.refreshed = refreshed;
+  input.meta.formulas = formulas;
   var plan = planUsTransferOrders(input, cfg);
+
+  // The sheet is what ships. Where it and the rules disagree, take the sheet's
+  // number and say so on the row.
+  if (cfg.FORMULAS.ENABLED) reconcileWithSheet(input, plan, cfg);
+
   writePlan(planner, input, plan, cfg, ctx);
   // Log every decision, shipped column blank until the orders are raised.
   try {
@@ -3557,14 +4753,23 @@ function verdictLines(plan) {
 function report_(result, ss) {
   var p = result.plan;
   var ui = SpreadsheetApp.getUi();
-  ui.alert('Plan built',
-    ss.getName() + '\n\n'
-    + verdictLines(p).join('\n') + '\n\n'
-    + 'Pallet: ' + palletStatus(p.pallet) + '\n'
-    + 'Needs review: ' + p.totals.needsReview + '\n'
-    + 'LTF flagged: ' + p.totals.ltfHeld + '\n\n'
-    + ss.getUrl(),
-    ui.ButtonSet.OK);
+  var lines = [ss.getName(), ''].concat(verdictLines(p), ['',
+    'Pallet: ' + palletStatus(p.pallet),
+    'Needs review: ' + p.totals.needsReview,
+    'LTF flagged: ' + p.totals.ltfHeld]);
+
+  if (p.reconcile) {
+    lines.push(p.reconcile.differed === 0
+      ? 'Sheet and rules agree on all ' + p.reconcile.checked + ' rows.'
+      : '⚠ ' + p.reconcile.differed + ' of ' + p.reconcile.checked
+        + ' rows differ between the sheet and the rules — the sheet\'s number '
+        + 'is the one on the row:\n    ' + p.reconcile.examples.join('\n    '));
+  }
+
+  lines.push('', 'Every calculated column is a live formula. Change a rate, or '
+    + 'a dial on the Settings tab, and the projection moves with it.', '',
+    ss.getUrl());
+  ui.alert('Plan built', lines.join('\n'), ui.ButtonSet.OK);
 }
 
 function showSettings() {

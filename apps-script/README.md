@@ -10,25 +10,71 @@ It proposes. Marco decides. Nothing here creates a shipment.
 
 ## What it does
 
-**Transfer Orders → Build US plan** copies the template into
-`Transfer orders / MM. Month / US /` as a dated file, reads fresh values, runs
-the three lanes with contention handling, and writes:
+**Transfer Orders → ▶ Build this week's plan** copies the template into
+`Transfer orders / MM. Month / US /` as a dated file and does the whole run:
 
-- case quantities into the decision columns (`N` / `P` / `Q`)
-- units as a formula (`=N8*O8`) so overriding a case count keeps units honest
-- a reason column (`X` / `AD` / `Y`) — `<qty> — <rule>[, <constraint>]`
-- one colour per pass, plus amber for review, red for LTF, grey for pallet fill
-- regenerated summary and CSV tabs
-- a `Run header` tab recording the timestamp, the dials used, and totals per lane
+1. authorises the IMPORTRANGE links, so nothing reads `#REF!` where a floor
+   should be
+2. builds the **Settings** tab and its named ranges
+3. pastes current values out of the IMS — **inputs only**
+4. writes every derived column as a **live formula**
+5. runs the rule engine over what the sheet worked out, reconciles the two, and
+   writes reasons, colours, summaries, CSV tabs and the run header
+
+Then hand-check it, override anything you disagree with, and raise the orders.
+
+### Values below, formulas above
+
+Every bug this planner has had has been the same bug: a number worked out
+somewhere else and pasted in, where a failed input silently became zero. A
+floor that read `#REF!` became no floor. The arithmetic was always right and
+the answer was always wrong, and nothing on the sheet showed which.
+
+So the split is deliberate:
+
+| | |
+|---|---|
+| **pasted as values** | stock, rates, case sizes, lifecycle, the Tactical floor — frozen at run time, so the planner stays a record of the numbers the decision was actually made on |
+| **live formulas** | days of cover, cases to transfer, units, cover after the transfer — all of it visible, all of it referencing the Settings tab by name |
+
+Change the rate in column `F` and the projection moves in front of you. Change
+`TacAwd_TargetDoi` on the Settings tab from 75 to 90 and the whole column
+reprices. Nothing has to be re-run to see the effect of a what-if.
+
+Each lane also gains a few working columns to the right of `Reason`, so the
+numbers behind a decision are on the row rather than implied by it:
+
+| Lane | Columns |
+|---|---|
+| Tactical > AWD | *Drawable after the Tactical floor*, *Qualifying cases* |
+| AWD > FBA | *Pass* (1/2/3), *Cases AWD could not cover* |
+| Tactical > FBA | *Target*, *Ceiling*, *Cases AWD could not cover*, *Wanted before stock and the floor* |
+
+`Drawable after the Tactical floor` is the answer to the question that kept
+coming back: *112 units, a floor of 100, cases of 12 — why one case?* Because
+one is what the floor leaves, and now the sheet says so.
+
+### The reason column still explains it in words
 
 ```
 0 — already 118 DOI
 20 cases — top-up to 100 DOI (B2B), capped by AWD stock
 6 cases — reserved-blocked, top-up available-only to 42 DOI
 0 — 1 case would reach 114 DOI (>110)
-2 cases — pallet fill, pulled forward from next run
 0 — Tactical floor (min 240 units) reached
 ```
+
+### Two implementations, checked against each other
+
+The rules exist twice: in `Rules_*.gs` and in the formulas. Two
+implementations drift, so every run compares them row by row. Where they
+differ **the sheet wins** — it is the number on the row, the one that gets
+picked and shipped — and the row is flagged with what the rule engine thought
+instead. The run dialog reports the count. Drift is loud rather than silent.
+
+`npm test` goes further: `test/helpers/sheet-eval.js` is a small Sheets formula
+evaluator, and `test/planner-formulas.test.js` runs both implementations over
+the same fixtures and requires the same answer.
 
 ## Install
 
@@ -59,14 +105,19 @@ fails if the bundle has drifted from them.
 
 | File | What lives there |
 |---|---|
-| `Config.gs` | every ID, tab name, column index and threshold |
+| `Config.gs` | every ID, tab name, column index and default threshold |
 | `Lib.gs` | pure helpers — `num`, `roundUp`, `dssLadder`, reason formatting |
 | `Read.gs` | sheets in, plain objects out |
+| `Settings.gs` | the dials, as a tab of named ranges, read back into config |
+| `Formulas.gs` | the lanes as formulas, and the reconciliation against the rules |
+| `Refresh.gs` | IMS inputs in, pasted as values, calculated columns untouched |
 | `Rules_AwdToFba.gs` | passes 1–3 |
-| `Rules_TacToAwd.gs` | DSS ladder + pallet fill |
+| `Rules_TacToAwd.gs` | the two-ended gate, the floor, the pallet test |
 | `Rules_TacToFba.gs` | the residual gates |
 | `Allocate.gs` | contention, and the pipeline that orders the lanes |
-| `Write.gs` | quantities, reasons, colours, summaries, CSVs, run header |
+| `Write.gs` | reasons, colours, summaries, CSVs, run header |
+| `Authorise.gs` | pre-approving the IMPORTRANGE links |
+| `History.gs` | the append-only TO log and the scorecard |
 | `Menu.gs` | `onOpen`, `buildPlan`, the dated copy |
 | `Backtest.gs` | replay a past planner and diff it |
 
@@ -76,31 +127,61 @@ the same way Apps Script concatenates them, so the tests exercise shipped code
 rather than a Node-flavoured copy of it.
 
 ```bash
-npm test                                  # 45 rule tests, no network
-node --test test/planner-rules.test.js
+npm test                                     # no network
+node --test test/planner-rules.test.js       # 54 rule tests
+node --test test/planner-formulas.test.js    # 30 formula tests
 ```
 
-## Configuration
+## The Settings tab
 
-Every threshold is in `Config.gs` — `60, 100, 110, 42, 40, 25, 7, 0.5` and the
-rest. Nothing is inline in a rule.
+Every dial the lanes use lives on a tab called **Settings**, one per row, each
+a named range the formulas reference:
 
-To change one without editing code, add a Script Property (File → Project
-properties → Script properties) using the dotted path as the key:
+| Named range | Is |
+|---|---|
+| `Dss_BaselineDoi` | 60 — the baseline target |
+| `Priority_Doi` | 100 — B2B and Critical |
+| `TacAwd_GateAwdDoi` / `TacAwd_GateFbaDoi` | 100 / 100 — short at both ends or nothing |
+| `TacAwd_TargetDoi` | 75 — where AWD is topped up to |
+| `Pallet_MinCases` | 25 — under this the whole run holds |
+| `AwdFba_Pass1TriggerDoi` / `AwdFba_Pass1TargetDoi` | 40 / 42 |
+| `AwdFba_ReservedRatio` | 0.5 |
+| `AwdFba_Pass2TriggerDoi` | 100 |
+| `AwdFba_MaxDoiAfter` | 110 — never leave FBA above this |
+| `TacFba_DiscontinuedAimDoi` / `TacFba_DiscontinuedMaxDoi` | 50 / 110 |
+| `TacFba_FloorBreachMaxDoi` | 30 — and the two that bound the rescue |
+| `Fba_MinUnitsBySku` | a two-column table; `101-4001 → 100` |
+| `Run_TacAwdQualifyingCases` / `Run_TacAwdVerdict` | derived — the pallet test |
+
+Editing a value changes both the formulas *and* the rule engine on the next
+run: `configFor()` reads the tab back over `Config.gs`, so the two cannot
+disagree about what 75 means. Clearing a cell restores the `Config.gs` default.
+
+`Config.gs` is still where the defaults live, and Script Properties still
+override those — the tab wins over both, because it is the one a human can see.
+**Tools → Settings in force** prints the resolved set.
+
+## Which IMS tab feeds which lane
+
+Pinned in `SOURCES.IMS_LANE_TABS`, never guessed:
 
 ```
-RULES.DSS                      60
-RULES.DSS_BY_LANE.AWD_TO_FBA   50      # per-lane override; blank = use DSS
-RULES.PALLET_MIN_CASES         25
-RULES.TAC_TO_FBA_QTY_MODE      to_target
+TAC_TO_AWD   US TO Tactical > AWD      (the planner's own tab has a trailing space)
+AWD_TO_FBA   US TO AWD > FBA
+TAC_TO_FBA   US TO Tactical > FBA
 ```
 
-**Transfer Orders → Show settings** prints what is actually in force.
+There used to be a header-matching fallback. It cannot work: all three IMS
+lane tabs open with the same six headers — `B2B`, `name`, `Mrkt`,
+`true_rate_30`, `order_plan_rate`, `product_life_cycle` — so every one of them
+scores identically against every lane. On 08-24 it chose `US TO AWD > FBA` to
+feed the Tactical > AWD lane and pasted 491 rows into a tab with 29, and every
+number after that was correct arithmetic on the wrong table. A pinned name that
+goes missing now fails loudly and names the config key, which is the only safe
+way for this to go wrong. Two lanes pinned to the same tab is refused outright.
 
-`SOURCES.LANES_FROM` picks where lane values come from. `'planner'` (the
-default) reads the planner's own lane tabs, which the template populates from
-the IMS with the formulas already in it. `'ims'` reads the IMS lane tabs
-directly — same layout, same reader; fill in `SOURCES.IMS_LANE_TABS` first.
+`SOURCES.LANES_FROM` picks where the rule engine reads from. `'planner'` (the
+default) reads the planner's own lane tabs. `'ims'` reads the IMS directly.
 The default is `'planner'` for a specific reason: a past planner carries its
 own snapshot and the IMS does not, so it is the only mode a back-test can run
 in.
@@ -237,10 +318,56 @@ Green for raise, grey for hold, so a held lane cannot be mistaken for a live
 one. The `AWD TO FBA` tab stays the pick list — SKU, case qty, units, cases —
 and the full scenario for every SKU stays on the lane tab beside it.
 
+## Every Thursday
+
+1. **Transfer Orders → ▶ Build this week's plan.** It makes the dated copy in
+   `Transfer orders / 08. August / US /`, pulls the IMS, rebuilds the formulas
+   and decides all three lanes. Everything else on this list is checking.
+2. Read the **RAISE THIS ORDER?** block in the dialog and on `Run header`.
+   A lane that says NO says why in the same line.
+3. On any lane that says YES, scan the `Reason` column. Amber is *worth a
+   second look*, red is LTF, and a thick red border is a floor breach.
+4. Disagree with something? Change the input, not the answer. Adjust the rate
+   in column `F`, or a dial on the **Settings** tab, and every projection moves
+   with it. If you type over a transfer quantity you replace that row's formula
+   with a fixed number — fine for a one-off, but it stops reacting.
+5. Raise the orders from the pick lists — `AWD TO FBA`, `To transfer Tac-AWD`,
+   `To transfer Tac-FBA` — and the CSV tabs.
+6. **Transfer Orders → Record what shipped.** That closes the loop: the history
+   workbook then holds proposed *and* shipped for every SKU, and
+   **Tools → Scorecard** shows where the rules and reality part company.
+
+Only step 1 is a command. If a dial needs changing, change it on the Settings
+tab and use **↻ Re-plan this file** — no new copy, same numbers, new answer.
+
 ## The Tactical floor
 
-Read straight from the min-units workbook (§2), confirmed against the formula
-in the planner's own column B:
+Held in three places now, which is two more than before:
+
+- **In the formula**, on the row: `Drawable after the Tactical floor (cases)`
+  is `FLOOR((Tactical units − minimum − whatever Tactical > FBA is taking) /
+  case qty)`, and the transfer column takes the smaller of that and demand.
+- **In `Rules_TacToAwd.gs`**, where the quantity is produced.
+- **In `Allocate.gs`**, which settles both Tactical lanes against one pool.
+
+It kept being lost because it lived in only the last of those: on 08-19 four
+SKUs holding exactly their 100-unit minimum shipped in full, because the only
+cap was one step further on than the number. And on 08-24 it looked lost again
+for a different reason — the lane had been filled from the wrong IMS tab, so
+column B held floors for products that were not on those rows at all.
+
+An unreadable floor is not a floor of zero. `#REF!` in column B — which is what
+an unauthorised IMPORTRANGE leaves — stops the row rather than freeing it.
+
+The two Tactical lanes draw on one pool, and a spreadsheet cannot settle that
+circularly. In the sheet, **Tactical > FBA is settled first** and its units come
+off the Tactical > AWD budget. That is the direction taken by hand anyway: the
+SPD lane moves small rescue quantities, the palletised lane waits. §8's 40-DOI
+switch still runs in `Allocate.gs`, so on the rare SKU where both lanes want
+the same stock the two can differ — and the reconciliation flags exactly that.
+
+The floor itself is read straight from the min-units workbook (§2), confirmed
+against the formula in the planner's own column B:
 
 ```
 =VLOOKUP(C9, IMPORTRANGE(".../14fW_-Gacy...", "B2B!A:E"), 5, 0)
@@ -262,17 +389,18 @@ SKUs and nothing else.
 
 ## What needs a decision
 
-Four, all config values — settling them is a value change, not an edit.
+All of these are values on the **Settings** tab — settling one is an edit to a
+cell, not to code.
 
-1. **The pass 2 trigger** (`RULES.PASS2_TRIGGER_DOI`). See above. This is the
+1. **The pallet minimum** (`Pallet_MinCases`). The spec says 25 and so did the
+   08-13 walkthrough; a later message said "i think it was 20 cases". It is
+   still 25. It decides whether a Tactical > AWD run goes at all, so it is
+   worth being sure: change the cell and `Run_TacAwdVerdict` flips in front of
+   you.
+
+2. **The pass 2 trigger** (`AwdFba_Pass2TriggerDoi`). See above. This is the
    one with volume behind it: it is worth 60% of the proposed cases on the
    lane that runs every week.
-
-2. **The pallet-fill ceiling** (§12, explicitly left open).
-   `PALLET_FILL_MAX_AWD_DOI` defaults to 100 and
-   `PALLET_FILL_MAX_CASES_PER_SKU` to 2. Both conservative. With only two
-   eligible SKUs the second caps the fill at 4 cases, and the run header
-   reports the shortfall rather than shipping an under-full pallet.
 
 3. **§7's quantity, stated twice and not identically.** "The smaller of (a) 1
    case and (b) cases to reach the target" is a minimum; "1 case, unless more
@@ -295,6 +423,21 @@ DOI ceiling.
 Also worth knowing: the 08-10 planner had `DSS` set to **50** on the AWD → FBA
 tab, not the 60 the spec calls for. The spec wins by default; set
 `RULES.DSS_BY_LANE.AWD_TO_FBA` to reproduce a past run.
+
+## Pallet filling no longer fires
+
+§6.1 tops a short Tactical > AWD load up with SKUs that did not need anything,
+to reach the 25-case pallet. In practice that is the wrong way round: five
+cases of real need padded with twenty of filler is more work, more freight and
+more stock sitting at AWD than doing nothing would have been.
+
+So the run is now decided first and filled never. `decideTacToAwdRun()` raises
+a run only once genuine demand already reaches the minimum, and
+`applyPalletFill()` returns untouched at or above it — the two conditions no
+longer overlap, so the fill cannot add a case. It is left wired up rather than
+deleted because the spec asks for it and a different verdict rule would want it
+back. The formulas implement none of it, so if it ever fires again every filled
+row shows up as a disagreement in the reconciliation.
 
 ## Not built
 

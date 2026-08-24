@@ -56,11 +56,20 @@ var CONFIG = {
      */
     LANES_FROM: 'planner',
 
-    /** Only needed when LANES_FROM is 'ims'. Layout must match §3. */
+    /**
+     * The IMS tabs each lane is fed from. Pinned, never guessed.
+     *
+     * All three carry the same first six headers — B2B, name, Mrkt,
+     * true_rate_30, order_plan_rate, product_life_cycle — so header matching
+     * cannot tell them apart. It picked the wrong one on 08-24 and put 491
+     * rows into a 29-row lane; every number after that was arithmetic on the
+     * wrong table. Note the planner's Tactical > AWD tab has a trailing space
+     * and the IMS one does not.
+     */
     IMS_LANE_TABS: {
-      TAC_TO_AWD: '',
-      AWD_TO_FBA: '',
-      TAC_TO_FBA: '',
+      TAC_TO_AWD: 'US TO Tactical > AWD',
+      AWD_TO_FBA: 'US TO AWD > FBA',
+      TAC_TO_FBA: 'US TO Tactical > FBA',
     },
   },
 
@@ -124,6 +133,7 @@ var CONFIG = {
 
     RUN_HEADER: 'Run header',
     HISTORY: 'TO history',
+    SETTINGS: 'Settings',
   },
 
   /** Header row and first data row, per §3. Lanes share these. */
@@ -471,6 +481,19 @@ var CONFIG = {
    * holds the previous run's numbers and the whole plan is correct arithmetic
    * on stale inputs.
    */
+  /**
+   * Which columns hold pasted values and which hold formulas.
+   *
+   * Inputs are frozen at run time — stock, rates, case sizes — so the planner
+   * stays a record of the numbers the decision was made on. Everything derived
+   * from them is a formula, so changing a rate reprices the projection in front
+   * of you instead of requiring another run.
+   */
+  FORMULAS: {
+    /** Write them on every run. Off leaves whatever is already in the sheet. */
+    ENABLED: true,
+  },
+
   REFRESH: {
     /** Do it automatically at the start of every run. */
     ENABLED: true,

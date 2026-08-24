@@ -20,8 +20,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // Order is cosmetic — nothing reads another file's globals at load time — but
 // keeping it stable makes the bundle diffable.
 const ORDER = ['Config.gs', 'Lib.gs', 'Rules_AwdToFba.gs', 'Rules_TacToAwd.gs',
-  'Rules_TacToFba.gs', 'Allocate.gs', 'Read.gs', 'Write.gs', 'Backtest.gs',
-  'Authorise.gs', 'Refresh.gs', 'History.gs', 'Menu.gs'];
+  'Rules_TacToFba.gs', 'Allocate.gs', 'Read.gs', 'Settings.gs', 'Formulas.gs',
+  'Write.gs', 'Backtest.gs', 'Authorise.gs', 'Refresh.gs', 'History.gs',
+  'Menu.gs'];
 
 const banner = [
   '/**',

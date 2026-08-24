@@ -1,16 +1,22 @@
 /**
- * Step one of the manual process, which the script had been skipping: pull the
- * current numbers out of the IMS and paste them into the planner as values.
+ * Step one of the manual process: pull the current numbers out of the IMS and
+ * paste them into the planner as values.
  *
  * Without this the planner is a copy of the last run and the lanes still hold
  * the last run's data. Everything downstream is then correct arithmetic on
  * stale inputs, which is the most expensive kind of wrong — it looks fine.
  *
- * Two things are deliberate:
+ * Three things are deliberate:
  *
  *  - Values, not formulas. The planner is a record of what was decided and the
- *    numbers behind it; a live formula would rewrite that record every time
+ *    numbers behind it; a live IMPORTRANGE would rewrite that record every time
  *    the IMS moves, and a back-test against it would measure nothing.
+ *
+ *  - Only inputs. Days of cover, cases to transfer and cover after the transfer
+ *    are formulas in the planner (see Formulas.gs). Pasting the IMS's own
+ *    versions over them would replace the live calculation with a dead number
+ *    and undo the entire point of the exercise. The list of columns to skip is
+ *    taken from the formula builders themselves, so the two cannot disagree.
  *
  *  - Locally-added columns survive. The Tactical minimum in column B is not in
  *    the IMS — it is looked up from the B2B tab and Marco keeps it visible on
@@ -19,51 +25,30 @@
  */
 
 /**
- * Find the IMS tab that feeds a lane.
+ * The IMS tab that feeds a lane. Pinned, never guessed.
  *
- * Prefers the configured name, then matches on the header row itself. Matching
- * on headers rather than names means a renamed tab still resolves, and a tab
- * that has been restructured fails loudly instead of pasting the wrong columns
- * into the right ones.
+ * There used to be a header-matching fallback here. It cannot work: all three
+ * IMS lane tabs open with the same six headers — B2B, name, Mrkt,
+ * true_rate_30, order_plan_rate, product_life_cycle — so every one of them
+ * scores the same against every lane. On 08-24 it picked `US TO AWD > FBA` for
+ * the Tactical > AWD lane and pasted 491 rows into a tab with 29, and every
+ * number after that was correct arithmetic on the wrong table.
+ *
+ * A pinned name that is missing fails loudly, which is the only safe way for
+ * this to go wrong.
  */
-function findImsLaneTab(ims, plannerSheet, configuredName, cfg) {
-  if (configuredName) {
-    var named = sheetByName(ims, configuredName);
-    if (named) return { sheet: named, how: 'configured name' };
+function findImsLaneTab(ims, laneKey, cfg) {
+  var name = (cfg.SOURCES.IMS_LANE_TABS || {})[laneKey];
+  if (!name) {
+    return { sheet: null, how: 'no IMS tab configured — set SOURCES.IMS_LANE_TABS.'
+      + laneKey + ' in Config.gs' };
   }
-
-  var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
-  var want = plannerSheet.getRange(headerRow, 1, 1, plannerSheet.getLastColumn())
-    .getValues()[0].map(headerKey).filter(String);
-  if (!want.length) return { sheet: null, how: 'planner has no header row' };
-
-  var best = null;
-  ims.getSheets().forEach(function (sh) {
-    // A Connected Sheet throws rather than returning a header, so it can never
-    // be a source and must not be probed.
-    if (!isGridSheet(sh)) return;
-    if (sh.getLastRow() < headerRow || sh.getLastColumn() < 1) return;
-    var got;
-    try {
-      got = sh.getRange(headerRow, 1, 1, sh.getLastColumn())
-        .getValues()[0].map(headerKey);
-    } catch (e) {
-      return; // unreadable for any other reason — not a candidate
-    }
-    var hits = 0;
-    want.forEach(function (h) { if (got.indexOf(h) !== -1) hits++; });
-    var score = hits / want.length;
-    if (!best || score > best.score) best = { sheet: sh, score: score };
-  });
-
-  if (best && best.score >= cfg.REFRESH.HEADER_MATCH_MIN) {
-    return { sheet: best.sheet, how: 'header match ' + Math.round(100 * best.score) + '%' };
+  var sh = sheetByName(ims, name);
+  if (!sh) {
+    return { sheet: null, how: 'the IMS has no tab named "' + name
+      + '" — check SOURCES.IMS_LANE_TABS.' + laneKey };
   }
-  return {
-    sheet: null,
-    how: 'no IMS tab matched the header (best '
-      + (best ? Math.round(100 * best.score) + '%' : 'none') + ')',
-  };
+  return { sheet: sh, how: 'configured name "' + name + '"' };
 }
 
 function headerKey(v) {
@@ -71,8 +56,20 @@ function headerKey(v) {
     .replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
+/** Column indexes the lane's formulas own, so the refresh leaves them alone. */
+function formulaColumns(laneKey, cfg) {
+  var build = LANE_FORMULA_BUILDERS[laneKey];
+  if (!build) return [];
+  var owned = Object.keys(build(cfg.LAYOUT.LANE_FIRST_DATA_ROW, cfg))
+    .map(Number);
+  var work = laneWorkColumns(cfg, laneKey);
+  Object.keys(work).forEach(function (k) { owned.push(work[k]); });
+  owned.push(cfg.COLS[laneKey].REASON);
+  return owned;
+}
+
 /**
- * Copy one lane's values across, column by column, honouring the preserve list.
+ * Copy one lane's input values across, column by column.
  *
  * Columns are matched by header, not by position: the IMS and the planner do
  * not have to agree on layout, and a column that has moved on one side lands
@@ -88,8 +85,7 @@ function refreshLane(ims, planner, laneKey, cfg) {
       note: 'the planner tab is a Connected Sheet — the script cannot write to it' };
   }
 
-  var found = findImsLaneTab(ims, plannerSheet,
-    cfg.SOURCES.IMS_LANE_TABS[laneKey], cfg);
+  var found = findImsLaneTab(ims, laneKey, cfg);
   if (!found.sheet) return { lane: tabName, ok: false, note: found.how };
   if (!isGridSheet(found.sheet)) {
     return { lane: tabName, ok: false, note: '"' + found.sheet.getName()
@@ -110,13 +106,16 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var srcRows = srcLast - firstRow + 1;
   var srcValues = src.getRange(firstRow, 1, srcRows, src.getLastColumn()).getValues();
 
-  var preserve = (cfg.REFRESH.PRESERVE_COLS[laneKey] || []).slice();
+  var skip = (cfg.REFRESH.PRESERVE_COLS[laneKey] || []).slice();
+  var derived = cfg.FORMULAS.ENABLED ? formulaColumns(laneKey, cfg) : [];
+  derived.forEach(function (c) { if (skip.indexOf(c) === -1) skip.push(c); });
+
   var copied = [];
   var skipped = [];
 
   for (var d = 0; d < dstHeader.length; d++) {
     if (!dstHeader[d]) continue;
-    if (preserve.indexOf(d) !== -1) { skipped.push(d); continue; }
+    if (skip.indexOf(d) !== -1) { skipped.push(d); continue; }
     var s = srcHeader.indexOf(dstHeader[d]);
     if (s === -1) continue;               // planner-only column: leave it alone
 
@@ -131,7 +130,7 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var dstLast = plannerSheet.getLastRow();
   if (dstLast > srcLast) {
     plannerSheet.getRange(srcLast + 1, 1, dstLast - srcLast,
-      plannerSheet.getLastColumn()).clearContent();
+      plannerSheet.getMaxColumns()).clearContent();
   }
 
   return {
@@ -144,9 +143,32 @@ function refreshLane(ims, planner, laneKey, cfg) {
 function refreshLanesFromIms(planner, cfg) {
   var conf = cfg || config();
   var ims = SpreadsheetApp.openById(conf.SOURCES.IMS_ID);
+
+  var pinned = conf.SOURCES.IMS_LANE_TABS || {};
+  var clash = duplicateLaneTabs(pinned);
+  if (clash) {
+    throw new Error('Two lanes are pinned to the same IMS tab ("' + clash
+      + '"). All three IMS lane tabs share the same headers, so this is exactly'
+      + ' the mistake that puts one lane\'s rows into another. Fix'
+      + ' SOURCES.IMS_LANE_TABS in Config.gs.');
+  }
+
   return ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].map(function (k) {
     return refreshLane(ims, planner, k, conf);
   });
+}
+
+/** The tab name two lanes share, or null. */
+function duplicateLaneTabs(pinned) {
+  var seen = {};
+  var keys = ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'];
+  for (var i = 0; i < keys.length; i++) {
+    var name = pinned[keys[i]];
+    if (!name) continue;
+    if (seen[name]) return name;
+    seen[name] = true;
+  }
+  return null;
 }
 
 function refreshLanesMenu() {
@@ -154,15 +176,16 @@ function refreshLanesMenu() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var answer = ui.alert('Refresh from the IMS?',
     'The three lane tabs in "' + ss.getName() + '" will be overwritten with '
-    + 'current values from the Inventory Monitoring Sheet.\n\nColumns the '
-    + 'planner adds itself — the Tactical minimum in column B — are left alone.',
+    + 'current values from the Inventory Monitoring Sheet.\n\nOnly input '
+    + 'columns are touched. The calculated columns stay as formulas, and the '
+    + 'Tactical minimum in column B is left alone.',
     ui.ButtonSet.OK_CANCEL);
   if (answer !== ui.Button.OK) return null;
 
-  var out = refreshLanesFromIms(ss, config());
+  var out = refreshLanesFromIms(ss, configFor(ss));
   var lines = out.map(function (r) {
     return (r.ok ? '✓ ' + r.lane + ' — ' + r.rows + ' rows from "' + r.from
-      + '" (' + r.how + '), ' + r.copied + ' columns, ' + r.preserved + ' preserved'
+      + '", ' + r.copied + ' input columns, ' + r.preserved + ' left as formulas'
       : '✗ ' + r.lane + ' — ' + r.note);
   });
   ui.alert('Refreshed from the IMS', lines.join('\n\n'), ui.ButtonSet.OK);

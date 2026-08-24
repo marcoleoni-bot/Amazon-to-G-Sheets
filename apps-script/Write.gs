@@ -19,7 +19,9 @@ function writePlan(planner, input, plan, cfg, ctx) {
   tintLaneUrgency(input.sheets.awdToFba, input.awdToFba, cfg.COLS.AWD_TO_FBA.AMZ_DOI, cfg);
   tintLaneUrgency(input.sheets.tacToFba, input.tacToFba, cfg.COLS.TAC_TO_FBA.AMZ_DOI, cfg);
 
-  if (cfg.OUTPUT.WRITE_RECOMPUTED_Y) {
+  // Column Y is a formula when the formula layer is on, and writing a value
+  // over it would strand the number pass 1 reads at whatever it was this run.
+  if (cfg.OUTPUT.WRITE_RECOMPUTED_Y && !cfg.FORMULAS.ENABLED) {
     writeAvailableOnlyDoi(input.sheets.awdToFba, input.awdToFba, cfg);
   }
   if (cfg.OUTPUT.WRITE_SUMMARIES) {
@@ -69,8 +71,14 @@ function writeLane(sheet, rows, decisions, C, cfg, reasonHeader) {
     fills[at][0] = colourFor(d, cfg);
   });
 
-  sheet.getRange(first, C.CASES_OUT + 1, span, 1).setValues(cases);
-  sheet.getRange(first, C.UNITS_OUT + 1, span, 1).setFormulas(units);
+  // With formulas on, the quantity and the units belong to the sheet. Writing
+  // a value over the formula would replace the live calculation with a dead
+  // number the moment the reasons are written — the exact thing the formula
+  // layer exists to stop.
+  if (!cfg.FORMULAS.ENABLED) {
+    sheet.getRange(first, C.CASES_OUT + 1, span, 1).setValues(cases);
+    sheet.getRange(first, C.UNITS_OUT + 1, span, 1).setFormulas(units);
+  }
 
   var reasonRange = sheet.getRange(first, C.REASON + 1, span, 1);
   reasonRange.setValues(reason);

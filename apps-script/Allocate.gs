@@ -193,7 +193,20 @@ function planUsTransferOrders(input, cfg) {
   // and a pallet, counting what could actually move left 13 and a wait.
   var tacAwdVerdict = decideTacToAwdRun(input.tacToAwd, tacAwdDec, cfg);
 
-  // 5 — the pallet minimum applies to a run that is going, and only then
+  // 5 — the pallet minimum applies to a run that is going, and only then.
+  //
+  // Which means the fill can no longer add a case, and that is deliberate.
+  // decideTacToAwdRun() only raises a run once demand already reaches the
+  // minimum, and applyPalletFill() returns untouched at or above it, so the
+  // two conditions no longer overlap. Filling was the thing Marco asked to be
+  // rid of: five cases of genuine need padded with twenty of SKUs that needed
+  // nothing, purely to fill a pallet.
+  //
+  // It is left wired up rather than deleted because §6.1 asks for it and a
+  // different verdict rule would want it back. Nothing in the sheet formulas
+  // implements it, so if it ever does fire again the reconciliation will
+  // report every filled row as a disagreement — which is the right way to
+  // find out.
   var pallet = tacAwdVerdict.raise
     ? applyPalletFill(input.tacToAwd, tacAwdDec, cfg, alloc.headroomUnits, ltf)
     : {
