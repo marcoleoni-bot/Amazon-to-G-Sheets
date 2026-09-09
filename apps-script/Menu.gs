@@ -167,10 +167,21 @@ function runPlan(planner, cfg, ctx) {
 
   // Everything derived, as formulas over those values. Tab names are resolved
   // from the file first: the script matches them loosely, a formula cannot.
+  //
+  // The refresh knows exactly how many rows it pasted, so it decides how far
+  // the formulas run. Reading that back off the sheet instead is what wrote
+  // 5,734 rows onto a 491-row lane.
   var formulas = null;
   if (cfg.FORMULAS.ENABLED) {
-    formulas = writeAllFormulas(planner, laneRowCounts(planner, cfg),
+    formulas = writeAllFormulas(planner, refreshedRowCounts(refreshed, planner, cfg),
       resolveTabNames(planner, cfg));
+    var noFormulas = formulaFailures(formulas);
+    if (noFormulas.length) {
+      throw new Error('These lanes got no calculated columns:\n  '
+        + noFormulas.map(function (r) { return r.lane + ' — ' + r.note; }).join('\n  ')
+        + '\n\nNothing has been decided. Fix that and run again rather than '
+        + 'raising an order from a lane that was never calculated.');
+    }
     SpreadsheetApp.flush();
   }
 

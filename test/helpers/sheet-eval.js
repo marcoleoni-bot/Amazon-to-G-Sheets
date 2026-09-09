@@ -362,6 +362,19 @@ const FUNCTIONS = {
   MAX: (args, ev) => reduceNumeric(args, ev, Math.max, -Infinity),
   MIN: (args, ev) => reduceNumeric(args, ev, Math.min, Infinity),
   SUM: (args, ev) => reduceNumeric(args, ev, (a, b) => a + b, 0),
+  INDEX: (args, ev, wb, sheet) => {
+    const grid = args[0].t === 'name'
+      ? (wb.names[args[0].name] || [])
+      : rangeValues(args[0], wb, sheet);
+    const r = toNumber(ev(args[1]));
+    if (isErr(r)) return r;
+    const c = args.length > 2 ? toNumber(ev(args[2])) : 1;
+    if (isErr(c)) return c;
+    const row = grid[r - 1];
+    if (!row) return new SheetError('#REF!');
+    const v = row[c - 1];
+    return v === undefined ? new SheetError('#REF!') : v;
+  },
   MATCH: (args, ev, wb, sheet) => {
     const key = ev(args[0]);
     if (isErr(key)) return key;

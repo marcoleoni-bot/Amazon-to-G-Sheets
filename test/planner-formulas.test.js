@@ -539,3 +539,130 @@ test('a SKU holding exactly its floor sends nothing on either implementation', (
   assert.deepEqual(sheet, [0]);
   assert.deepEqual(rules, [0]);
 });
+
+// ------------------------------------------------- no circular dependencies
+
+/**
+ * The check that would have caught the #REF! on 09-09.
+ *
+ * Google Sheets resolves open ranges at range granularity, not cell
+ * granularity. Two lanes each holding a wide `Sheet!$D:$S`-style lookup into
+ * the other are called circular even when no individual cell forms a loop, and
+ * the whole transfer column reads #REF!. So the test is deliberately as coarse
+ * as Sheets is: build the dependency graph at **column** granularity and
+ * require it to be acyclic.
+ */
+function columnDeps(node, sheet, into) {
+  if (!node || typeof node !== 'object') return;
+  const tab = node.sheet || sheet;
+  if (node.t === 'cell') into.add(`${tab}!${node.col}`);
+  if (node.t === 'colrange' || node.t === 'cellrange') {
+    const from = node.from.split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+    const to = node.to.split('').reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+    for (let i = from; i <= to; i++) {
+      let s = '';
+      let n = i;
+      while (n > 0) { s = String.fromCharCode(65 + ((n - 1) % 26)) + s; n = Math.floor((n - 1) / 26); }
+      into.add(`${tab}!${s}`);
+    }
+  }
+  if (node.t === 'name') into.add(`@${node.name}`);
+  (node.args || []).forEach((a) => columnDeps(a, sheet, into));
+  columnDeps(node.left, sheet, into);
+  columnDeps(node.right, sheet, into);
+  columnDeps(node.arg, sheet, into);
+}
+
+test('the lane formulas contain no circular dependency, column by column', () => {
+  const c = cfg();
+  const graph = new Map();
+
+  ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].forEach((lane) => {
+    const tab = c.TABS[lane];
+    const built = G.LANE_FORMULA_BUILDERS[lane](8, c);
+    Object.entries(built).forEach(([col, formula]) => {
+      const deps = new Set();
+      columnDeps(parseFormula(formula), tab, deps);
+      let n = Number(col) + 1;
+      let letters = '';
+      while (n > 0) { letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters; n = Math.floor((n - 1) / 26); }
+      graph.set(`${tab}!${letters}`, deps);
+    });
+  });
+
+  // The two derived cells on the Settings tab, which every transfer column reads.
+  const qualify = G.laneWorkColumns(c, 'TAC_TO_AWD').QUALIFY;
+  let n = qualify + 1;
+  let qCol = '';
+  while (n > 0) { qCol = String.fromCharCode(65 + ((n - 1) % 26)) + qCol; n = Math.floor((n - 1) / 26); }
+  graph.set(`@${G.SETTINGS_NAMES.RUN_TAC_AWD_QUALIFYING}`,
+    new Set([`${c.TABS.TAC_TO_AWD}!${qCol}`]));
+  graph.set(`@${G.SETTINGS_NAMES.RUN_TAC_AWD_VERDICT}`,
+    new Set([`@${G.SETTINGS_NAMES.RUN_TAC_AWD_QUALIFYING}`,
+      `@${G.SETTINGS_NAMES.PALLET_MIN}`]));
+
+  const state = new Map();
+  const trail = [];
+  function walk(node) {
+    if (state.get(node) === 'done') return null;
+    if (state.get(node) === 'open') {
+      return trail.slice(trail.indexOf(node)).concat(node).join(' → ');
+    }
+    state.set(node, 'open');
+    trail.push(node);
+    for (const dep of graph.get(node) || []) {
+      const cycle = walk(dep);
+      if (cycle) return cycle;
+    }
+    trail.pop();
+    state.set(node, 'done');
+    return null;
+  }
+
+  for (const node of graph.keys()) {
+    const cycle = walk(node);
+    assert.equal(cycle, null, `circular dependency: ${cycle}`);
+  }
+});
+
+test('cross-lane lookups touch one column, not a slab', () => {
+  const c = cfg();
+  ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].forEach((lane) => {
+    const built = G.LANE_FORMULA_BUILDERS[lane](8, c);
+    Object.entries(built).forEach(([col, formula]) => {
+      assert.ok(!/VLOOKUP\(\s*\$?[A-Z]+\d+\s*,\s*'/.test(formula),
+        `${lane} col ${col} still uses a cross-sheet VLOOKUP block:\n${formula}`);
+    });
+  });
+});
+
+test('a lane stops at its last SKU, not at a stray cell far below', () => {
+  const c = cfg();
+  const first = c.LAYOUT.LANE_FIRST_DATA_ROW;
+  const nameCol = c.COLS.TAC_TO_AWD.NAME;
+
+  // 491 SKUs, then nothing until a leftover value at what would be row 5741.
+  const grid = [];
+  const put = (r, col, v) => {
+    while (grid.length < r) grid.push([]);
+    grid[r - 1][col] = v;
+  };
+  for (let i = 0; i < 491; i++) put(first + i, nameCol, `SKU-${i}`);
+  put(5741, nameCol, 'stray');
+
+  const sheet = {
+    getLastRow: () => 5741,
+    getRange: (row, col, rows) => ({
+      getValues: () => {
+        const out = [];
+        for (let r = row; r < row + rows; r++) {
+          out.push([(grid[r - 1] || [])[col - 1] ?? '']);
+        }
+        return out;
+      },
+    }),
+  };
+
+  assert.equal(G.laneRowCount(sheet, 'TAC_TO_AWD', c), 491,
+    'the stray value at row 5741 must not stretch the lane to meet it');
+});

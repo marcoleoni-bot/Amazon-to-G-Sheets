@@ -2712,11 +2712,33 @@ function numRef(col0, row) {
   return 'N(' + cellRef(col0, row) + ')';
 }
 
-/** A VLOOKUP into another lane, keyed on its SKU column. Misses read as 0. */
+/**
+ * A lookup into another lane, keyed on its SKU column. Misses read as 0.
+ *
+ * INDEX/MATCH over two single columns, never VLOOKUP over a block.
+ *
+ * VLOOKUP($C8,'US TO Tactical > FBA'!$D:$S,16,FALSE) makes this cell depend on
+ * *sixteen whole columns* of the other lane. The other lane has its own lookup
+ * pointing back here, over ten of ours. Neither individual cell forms a loop —
+ * both point at input columns in the end — but Sheets resolves open ranges at
+ * range granularity, sees two sheets each referencing a wide slab of the
+ * other, and calls it a circular dependency. The whole transfer column then
+ * reads #REF!, and no amount of IFERROR hides it, because a circular cell is
+ * marked circular rather than given an error value to catch.
+ *
+ * INDEX/MATCH narrows each edge to exactly two columns — the SKU column, which
+ * is always a pasted value, and the one column actually wanted. The dependency
+ * graph is then provably acyclic column by column, which is what
+ * `test/planner-formulas.test.js` checks on every run. It is also far cheaper:
+ * a block VLOOKUP over 491 rows × 16 columns × 3 lanes is a lot of scanning to
+ * fetch one number.
+ */
 function laneLookup(cfg, laneKey, keyCol0, valueCol0, keyExpr) {
-  return 'IFERROR(VLOOKUP(' + keyExpr + ',' + quoteTab(cfg.TABS[laneKey]) + '!$'
-    + colLetter(keyCol0) + ':$' + colLetter(valueCol0) + ','
-    + (valueCol0 - keyCol0 + 1) + ',FALSE),0)';
+  var tab = quoteTab(cfg.TABS[laneKey]);
+  var value = '$' + colLetter(valueCol0) + ':$' + colLetter(valueCol0);
+  var key = '$' + colLetter(keyCol0) + ':$' + colLetter(keyCol0);
+  return 'IFERROR(INDEX(' + tab + '!' + value + ',MATCH(' + keyExpr + ','
+    + tab + '!' + key + ',0)),0)';
 }
 
 /**
@@ -3009,10 +3031,10 @@ function formulasTacToFba(row, cfg) {
   // Gate 1 — strictly residual. The lane opens only where AWD wanted to send
   // more and ran out of stock, or where the SKU has no AWD stock at all.
   var uncovered = laneLookup(cfg, 'AWD_TO_FBA', A.NAME, AW.UNCOVERED, sku);
+  var onAwdLane = 'ISNA(MATCH(' + sku + ',' + quoteTab(cfg.TABS.AWD_TO_FBA) + '!$'
+    + colLetter(A.NAME) + ':$' + colLetter(A.NAME) + ',0))';
   f[W.RESIDUAL] = '=' + iff(sku + '=""', '""',
-    iff('ISNA(MATCH(' + sku + ',' + quoteTab(cfg.TABS.AWD_TO_FBA) + '!$'
-      + colLetter(A.NAME) + ':$' + colLetter(A.NAME) + ',0))',
-      iff(numRef(C.AWD_AVAILABLE, row) + '<=0', '9999', '0'),
+    iff(onAwdLane, iff(numRef(C.AWD_AVAILABLE, row) + '<=0', '9999', '0'),
       uncovered));
 
   // Gate 2 — nothing already on its way into AWD inside 14 days.
@@ -3094,9 +3116,23 @@ var LANE_FORMULA_BUILDERS = {
  * difference between a run that finishes and one that times out on 491 rows.
  */
 function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
-  if (!sheet || rowCount <= 0) return { lane: laneKey, ok: false, note: 'no rows' };
+  if (!sheet) return { lane: laneKey, ok: false, note: 'no such tab' };
   if (!isGridSheet(sheet)) {
     return { lane: laneKey, ok: false, note: 'Connected Sheet — cannot write formulas' };
+  }
+
+  // The count is settled here, against the sheet, rather than taken on trust.
+  // A hint from the refresh (which knows exactly how many rows it pasted) wins
+  // over the scan; the scan is the fallback when there was no refresh.
+  var counted = laneRowCount(sheet, laneKey, cfg);
+  var rows = (rowCount > 0) ? rowCount : counted;
+  if (rows <= 0) {
+    return { lane: laneKey, ok: false,
+      note: 'no SKUs on the tab — nothing to calculate' };
+  }
+  if (counted > 0 && rowCount > 0 && counted !== rowCount) {
+    // Not fatal, but worth saying: the two disagree about where the data ends.
+    rows = Math.max(counted, rowCount);
   }
 
   var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
@@ -3107,10 +3143,23 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
   Object.keys(work).forEach(function (k) { widest = Math.max(widest, work[k]); });
   ensureColumns(sheet, widest + 1);
 
+  // Clear the tail *first*, and against getMaxRows() rather than getLastRow().
+  //
+  // Clearing afterwards used to be conditional on getLastRow(), and getLastRow()
+  // is exactly the number a previous over-long write has already corrupted: on
+  // 09-09 the Tactical > AWD tab carried transfer formulas down to row 5741
+  // against 491 rows of data, so the clear computed a tail of nothing and left
+  // all 5,243 of them in place. Clearing up front, to the bottom of the grid,
+  // cannot be defeated by the state it is meant to repair.
+  var below = sheet.getMaxRows() - (first + rows) + 1;
+  if (below > 0) {
+    sheet.getRange(first + rows, 1, below, sheet.getMaxColumns()).clearContent();
+  }
+
   // Build the whole block first, so a bad column index throws before anything
   // is written rather than half way through.
   var byColumn = {};
-  for (var i = 0; i < rowCount; i++) {
+  for (var i = 0; i < rows; i++) {
     var f = build(first + i, cfg);
     Object.keys(f).forEach(function (col) {
       if (!byColumn[col]) byColumn[col] = [];
@@ -3119,26 +3168,22 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
   }
 
   Object.keys(byColumn).forEach(function (col) {
-    sheet.getRange(first, Number(col) + 1, rowCount, 1).setFormulas(byColumn[col]);
+    sheet.getRange(first, Number(col) + 1, rows, 1).setFormulas(byColumn[col]);
   });
 
-  // Anything below the SKUs is a previous run's tail. Leaving it there is how
-  // a 29-row lane keeps reporting 491 rows of arithmetic on nothing.
-  var tail = sheet.getLastRow() - (first + rowCount) + 1;
-  if (tail > 0) {
-    sheet.getRange(first + rowCount, 1, tail, sheet.getMaxColumns()).clearContent();
-  }
-
   writeWorkHeaders(sheet, laneKey, cfg);
-  return { lane: laneKey, ok: true, rows: rowCount, columns: Object.keys(byColumn).length };
+  return {
+    lane: laneKey, ok: true, rows: rows, counted: counted, hinted: rowCount || 0,
+    columns: Object.keys(byColumn).length,
+  };
 }
 
 /**
  * How many data rows each lane actually has, counted on the SKU column.
  *
- * Not getLastRow(): a previous run's formulas can sit hundreds of rows below
- * the last SKU, and taking the sheet's word for it is what let 491 rows of
- * decisions accumulate on a lane with 29 products.
+ * Not getLastRow(): a previous run's formulas can sit thousands of rows below
+ * the last SKU, and taking the sheet's word for it is what wrote 5,734 rows of
+ * decisions onto a lane with 491 products.
  */
 function laneRowCounts(planner, cfg) {
   var out = {};
@@ -3149,18 +3194,38 @@ function laneRowCounts(planner, cfg) {
   return out;
 }
 
+/** How far a run of blank SKUs may go before the lane is judged finished. */
+var LANE_BLANK_RUN = 25;
+
+/**
+ * The lane's data rows: from the first, up to the last SKU before a long run
+ * of blanks.
+ *
+ * "Last non-blank cell in the column" is the obvious reading and the wrong one.
+ * One stray value left far below the data — a note, a leftover formula, a
+ * pasted cell — stretches the lane to meet it, and every row in between gets a
+ * full set of transfer formulas computing on nothing. A lane's SKU list is
+ * contiguous, so a couple of dozen blanks in a row is the end of it.
+ */
 function laneRowCount(sheet, laneKey, cfg) {
   var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
   var last = sheet.getLastRow();
   if (last < first) return 0;
+
   var vals = sheet.getRange(first, cfg.COLS[laneKey].NAME + 1, last - first + 1, 1)
     .getValues();
-  for (var i = vals.length - 1; i >= 0; i--) {
-    if (String(vals[i][0] === null || vals[i][0] === undefined ? '' : vals[i][0]).trim()) {
-      return i + 1;
+  var lastSeen = 0;
+  var blanks = 0;
+  for (var i = 0; i < vals.length; i++) {
+    var v = vals[i][0];
+    if (String(v === null || v === undefined ? '' : v).trim()) {
+      lastSeen = i + 1;
+      blanks = 0;
+    } else if (++blanks >= LANE_BLANK_RUN && lastSeen) {
+      break;
     }
   }
-  return 0;
+  return lastSeen;
 }
 
 function writeWorkHeaders(sheet, laneKey, cfg) {
@@ -3208,10 +3273,40 @@ function resolveTabNames(planner, cfg) {
  * each lane only ever looks upstream.
  */
 function writeAllFormulas(planner, rowCounts, cfg) {
+  var counts = rowCounts || {};
   return ['AWD_TO_FBA', 'TAC_TO_FBA', 'TAC_TO_AWD'].map(function (k) {
     return writeLaneFormulas(sheetByName(planner, cfg.TABS[k]), k,
-      rowCounts[k] || 0, cfg);
+      counts[k] || 0, cfg);
   });
+}
+
+/**
+ * A lane that quietly received no formulas is worse than one that failed.
+ *
+ * On 09-09 Tactical > FBA came out of the run with its headers written and not
+ * one calculated cell underneath, so the residual lane proposed nothing all
+ * week and looked settled rather than broken. The run says so now.
+ */
+function formulaFailures(results) {
+  return (results || []).filter(function (r) { return !r.ok; });
+}
+
+/**
+ * How far each lane's formulas should run, preferring what the refresh just
+ * pasted over what the sheet appears to hold.
+ *
+ * `refreshLane()` returns the row count it copied out of the IMS, which is the
+ * one number in the run that is known rather than inferred. Falls back to
+ * scanning the tab when the refresh was skipped or a lane failed.
+ */
+function refreshedRowCounts(refreshed, planner, cfg) {
+  var out = laneRowCounts(planner, cfg);
+  if (!refreshed) return out;
+  var keys = ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'];
+  refreshed.forEach(function (r, i) {
+    if (r && r.ok && r.rows > 0) out[keys[i]] = r.rows;
+  });
+  return out;
 }
 
 /**
@@ -4779,10 +4874,21 @@ function runPlan(planner, cfg, ctx) {
 
   // Everything derived, as formulas over those values. Tab names are resolved
   // from the file first: the script matches them loosely, a formula cannot.
+  //
+  // The refresh knows exactly how many rows it pasted, so it decides how far
+  // the formulas run. Reading that back off the sheet instead is what wrote
+  // 5,734 rows onto a 491-row lane.
   var formulas = null;
   if (cfg.FORMULAS.ENABLED) {
-    formulas = writeAllFormulas(planner, laneRowCounts(planner, cfg),
+    formulas = writeAllFormulas(planner, refreshedRowCounts(refreshed, planner, cfg),
       resolveTabNames(planner, cfg));
+    var noFormulas = formulaFailures(formulas);
+    if (noFormulas.length) {
+      throw new Error('These lanes got no calculated columns:\n  '
+        + noFormulas.map(function (r) { return r.lane + ' — ' + r.note; }).join('\n  ')
+        + '\n\nNothing has been decided. Fix that and run again rather than '
+        + 'raising an order from a lane that was never calculated.');
+    }
     SpreadsheetApp.flush();
   }
 

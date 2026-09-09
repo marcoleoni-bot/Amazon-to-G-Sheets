@@ -64,6 +64,28 @@ one is what the floor leaves, and now the sheet says so.
 0 — Tactical floor (min 240 units) reached
 ```
 
+### Cross-lane lookups are INDEX/MATCH, never a VLOOKUP block
+
+The lanes have to see each other: Tactical > AWD needs what Tactical > FBA is
+taking off the same pallet, Tactical > FBA needs what AWD could not cover, and
+what is already inbound to AWD.
+
+Each of those edges is `INDEX(<one column>, MATCH(<sku>, <sku column>, 0))` —
+two single columns, never `VLOOKUP(sku, 'Other lane'!$D:$S, 16, FALSE)`.
+
+That is not style. A block VLOOKUP makes the cell depend on sixteen whole
+columns of the other lane, which has its own block lookup pointing back over
+ten of ours. No individual cell forms a loop — every back-edge lands on a
+pasted input in the end — but Sheets resolves open ranges at range granularity,
+sees two sheets each referencing a wide slab of the other, and calls it a
+circular dependency. The entire transfer column then reads `#REF!`, and
+`IFERROR` cannot catch it: a circular cell is marked circular rather than given
+an error value.
+
+`test/planner-formulas.test.js` builds the dependency graph from the generated
+formulas at **column** granularity — as coarse as Sheets is — and fails if it
+finds a cycle. A second test refuses any cross-sheet VLOOKUP block outright.
+
 ### Two implementations, checked against each other
 
 The rules exist twice: in `Rules_*.gs` and in the formulas. Two
@@ -129,8 +151,31 @@ rather than a Node-flavoured copy of it.
 ```bash
 npm test                                     # no network
 node --test test/planner-rules.test.js       # 54 rule tests
-node --test test/planner-formulas.test.js    # 30 formula tests
+node --test test/planner-formulas.test.js    # 35 formula tests
 ```
+
+## How far the formulas run
+
+Three separate things once got this wrong at once, on 09-09:
+
+- **The row count came from the sheet.** `getLastRow()` on the Tactical > AWD
+  tab said 5741 against 491 SKUs, so 5,734 rows of transfer formulas went in.
+  The count now prefers what the refresh just pasted — the one number in the
+  run that is known rather than inferred — and falls back to scanning the SKU
+  column.
+- **The scan stretched to meet a stray cell.** "Last non-blank in the column"
+  finds a leftover value thousands of rows below the data and fills everything
+  in between. A lane's SKU list is contiguous, so the scan now stops after
+  `LANE_BLANK_RUN` (25) consecutive blanks.
+- **The tail-clear was defeated by the state it was meant to repair.** It ran
+  after the write and measured against `getLastRow()` — the very number the
+  over-long write had corrupted — so it computed a tail of nothing. It now runs
+  *first* and clears to `getMaxRows()`.
+
+And a lane that silently received no formulas — Tactical > FBA came out of that
+run with its headers written and not one calculated cell underneath, so the
+residual lane proposed nothing all week and looked settled rather than broken —
+now stops the run with an error naming the lane.
 
 ## The Settings tab
 
