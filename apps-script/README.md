@@ -47,8 +47,8 @@ numbers behind a decision are on the row rather than implied by it:
 | Lane | Columns |
 |---|---|
 | Tactical > AWD | *Drawable after the Tactical floor*, *Qualifying cases* |
-| AWD > FBA | *Pass* (1/2/3), *Cases AWD could not cover* |
-| Tactical > FBA | *Target*, *Ceiling*, *Cases AWD could not cover*, *Wanted before stock and the floor* |
+| AWD > FBA | *Pass* (1/2/3), *Target*, *Cases needed to reach the target*, *Cases AWD could not cover* |
+| Tactical > FBA | *Target*, *Ceiling*, *Cases AWD could not cover*, *Wanted before the ceiling*, *Wanted before stock and the floor* |
 
 `Drawable after the Tactical floor` is the answer to the question that kept
 coming back: *112 units, a floor of 100, cases of 12 — why one case?* Because
@@ -85,6 +85,48 @@ an error value.
 `test/planner-formulas.test.js` builds the dependency graph from the generated
 formulas at **column** granularity — as coarse as Sheets is — and fails if it
 finds a cycle. A second test refuses any cross-sheet VLOOKUP block outright.
+
+### Named ranges are moved, never deleted
+
+Deleting a named range in Sheets rewrites every formula that referenced it,
+on the spot, to the literal text `#REF!`. Re-creating the name a moment later
+does not undo that — the formulas have already been edited.
+
+`ensureSettings` used to remove and re-create all of them on every run, so
+every plan began by shredding the formulas the previous plan had written. It
+self-repaired whenever the run got as far as rewriting the lanes, and did not
+when it didn't, which is how AWD > FBA came back full of
+
+```
+ROUNDUP((#REF!-N($Y8))*...        where AwdFba_Pass1TargetDoi had been
+IF(N($J8)+N($O8)<#REF!,...        where Dss_BaselineDoi had been
+```
+
+Existing names are now re-pointed with `setRange()`, which touches no formula.
+A workbook already carrying that damage is repaired by the next run, since
+every calculated column is rewritten from scratch.
+
+### The per-SKU unit floor at FBA
+
+`Fba_MinUnitsBySku` — `101-4001 → 100` — is a count of stock somebody decided
+must be there, not a days-of-cover judgement. So it outranks every DOI rule on
+**both** lanes that can reach FBA:
+
+- **AWD > FBA** fills it first, above its own three passes and above the 110
+  ceiling. It reaches the quantity through the target column, so *Cases needed
+  to reach the target* reads as the floor requirement and the shortfall carried
+  onward is measured against the floor too.
+- **Tactical > FBA** covers whatever is left, and skips the residual and
+  inbound gates to do it. Those gates ask whether AWD could have covered a
+  days-of-cover target and whether replenishment is on its way to AWD; neither
+  is the question when the instruction is "never hold fewer than 100 units".
+  It nets off what AWD is sending this run — column X — so the two lanes fill
+  the floor once between them rather than twice.
+
+Only Tactical > FBA knew about the floor before, and that lane is strictly
+residual. So when AWD looked at 101-4001, decided its cover was fine and sent
+nothing, the residual gate read "AWD found no need" and shut. Nobody filled the
+floor and nothing said so.
 
 ### Two implementations, checked against each other
 
@@ -151,7 +193,7 @@ rather than a Node-flavoured copy of it.
 ```bash
 npm test                                     # no network
 node --test test/planner-rules.test.js       # 54 rule tests
-node --test test/planner-formulas.test.js    # 35 formula tests
+node --test test/planner-formulas.test.js    # 40 formula tests
 ```
 
 ## How far the formulas run

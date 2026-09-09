@@ -163,6 +163,9 @@ function planUsTransferOrders(input, cfg) {
   input.awdToFba.forEach(function (r, i) {
     awdBySku[normSku(r.sku)] = {
       cases: awdFbaDec[i].cases,
+      // Units as well as cases: a unit floor is netted off in units, and the
+      // two lanes have to fill it once between them rather than twice.
+      units: (awdFbaDec[i].cases > 0 ? awdFbaDec[i].cases : 0) * r.caseQty,
       cappedByAwdStock: !!awdFbaDec[i].cappedByAwdStock,
       shortfallCases: awdFbaDec[i].shortfallCases || 0,
       awdAvailableUnits: r.awdAvailableUnits,

@@ -48,6 +48,11 @@ function planAwdToFba(rows, cfg, ltfIndex) {
     out[i] = pass3(r, dss, R, remaining);
   });
 
+  // ---- the per-SKU unit floor, which outranks all three ------------------
+  rows.forEach(function (r, i) {
+    applyUnitFloor(out[i], r, cfg, remaining);
+  });
+
   // ---- what FBA is still short of, and whether AWD could have fixed it ---
   rows.forEach(function (r, i) {
     markResidualNeed(out[i], r, cfg, dss, remaining);
@@ -75,11 +80,55 @@ function planAwdToFba(rows, cfg, ltfIndex) {
  * case and FBA is *still* under target. The request was met in full, nothing
  * was clipped, and AWD is empty — which is exactly a shortage.
  */
+/**
+ * The unit floor, applied after the passes and above all of them.
+ *
+ * AWD is the lane that normally feeds FBA, so it fills the floor when it can.
+ * Until now only Tactical > FBA knew the floor existed, and that lane is
+ * strictly residual — so when AWD looked at 101-4001, decided its days of
+ * cover were fine and sent nothing, the residual gate on the other lane read
+ * "AWD found no need" and shut. Nobody filled the floor and nothing said so.
+ *
+ * Measured in units, not days: the floor is a count of stock, and converting
+ * it to cover and back rounds.
+ */
+function applyUnitFloor(d, r, cfg, remaining) {
+  if (!d || !(r.caseQty > 0)) return d;
+  var floorUnits = unitFloorFor(r.sku, cfg.RULES);
+  if (!(floorUnits > 0)) return d;
+
+  var need = clampMin0(roundUp((floorUnits - r.amzTotal) / r.caseQty));
+  if (need <= d.cases) return d;
+
+  var key = normSku(r.sku);
+  var free = remaining[key] === undefined ? r.awdAvailableUnits : remaining[key];
+  // What this row already claimed is still its own to re-spend.
+  var budget = free + d.cases * r.caseQty;
+  var affordable = Math.min(r.availableCases, casesIn(budget, r.caseQty));
+
+  var was = d.cases;
+  d.cases = clampMin0(Math.min(need, affordable));
+  remaining[key] = clampMin0(budget - d.cases * r.caseQty);
+  if (d.cases <= was) return d;
+
+  d.pass = 'PASS_2';
+  d.rule = 'to the ' + floorUnits + '-unit floor at FBA';
+  d.notes = [fmt(r.amzTotal) + ' units at FBA'];
+  if (d.cases < need) {
+    addNote(d, 'capped by AWD stock, ' + (need - d.cases) + ' cases short');
+    addFlag(d, 'NEEDS_REVIEW');
+  }
+  return d;
+}
+
 function markResidualNeed(d, r, cfg, dss, remaining) {
   if (!d) return;
   var target = (r.b2b || r.critical) ? cfg.RULES.PRIORITY_DOI : dss;
   var sent = d.cases > 0 ? d.cases : 0;
-  var needed = clampMin0(roundUp((target - r.amzDoi) * r.rate / r.caseQty));
+  var floorUnits = unitFloorFor(r.sku, cfg.RULES);
+  var needed = floorUnits > 0
+    ? clampMin0(roundUp((floorUnits - r.amzTotal) / r.caseQty))
+    : clampMin0(roundUp((target - r.amzDoi) * r.rate / r.caseQty));
   var shortfall = clampMin0(needed - sent);
   var free = remaining[normSku(r.sku)];
   if (free === undefined) free = r.awdAvailableUnits;

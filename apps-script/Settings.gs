@@ -327,7 +327,24 @@ function styleSettings(sh, plan, cfg) {
   sh.setFrozenRows(4);
 }
 
-/** Point each name at its cell, replacing any older definition. */
+/**
+ * Point each name at its cell — **in place**, never by removing it first.
+ *
+ * Removing a named range in Sheets is destructive to everything that used it:
+ * every formula referencing the name is rewritten, on the spot, with the
+ * literal text `#REF!`. Re-creating the name a moment later does not undo
+ * that — the formulas have already been edited.
+ *
+ * This ran on every plan, so every run began by shredding the lane formulas
+ * the previous run had written. It self-repaired whenever writeAllFormulas()
+ * got as far as rewriting the lane, and did not when it didn't, which is why
+ * AWD > FBA came back full of
+ *
+ *   ROUNDUP((#REF!-N($Y8))*...        where AwdFba_Pass1TargetDoi had been
+ *   IF(N($J8)+N($O8)<#REF!,...        where Dss_BaselineDoi had been
+ *
+ * `setRange()` moves an existing name without touching a single formula.
+ */
 function nameSettingsRanges(ss, sh, plan) {
   var wanted = {};
   plan.dials.forEach(function (d) { wanted[d.name] = sh.getRange(d.row, 2); });
@@ -335,12 +352,30 @@ function nameSettingsRanges(ss, sh, plan) {
     wanted[t.name] = sh.getRange(t.row, 1, t.height, 2);
   });
 
-  ss.getNamedRanges().forEach(function (nr) {
-    if (wanted[nr.getName()]) nr.remove();
-  });
+  var existing = {};
+  ss.getNamedRanges().forEach(function (nr) { existing[nr.getName()] = nr; });
+
+  var moved = 0;
+  var created = 0;
   Object.keys(wanted).forEach(function (name) {
-    ss.setNamedRange(name, wanted[name]);
+    var range = wanted[name];
+    var nr = existing[name];
+    if (!nr) {
+      ss.setNamedRange(name, range);
+      created++;
+      return;
+    }
+    // Only move it if it is actually somewhere else; setRange() is cheap but
+    // a no-op write is still a write.
+    var was;
+    try { was = nr.getRange().getA1Notation(); } catch (e) { was = null; }
+    if (was !== range.getA1Notation()
+        || (nr.getRange().getSheet().getSheetId() !== sh.getSheetId())) {
+      nr.setRange(range);
+      moved++;
+    }
   });
+  return { moved: moved, created: created };
 }
 
 // -------------------------------------------------------------------- reading

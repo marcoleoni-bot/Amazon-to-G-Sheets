@@ -666,3 +666,139 @@ test('a lane stops at its last SKU, not at a stray cell far below', () => {
   assert.equal(G.laneRowCount(sheet, 'TAC_TO_AWD', c), 491,
     'the stray value at row 5741 must not stretch the lane to meet it');
 });
+
+// ------------------------------------------------ named ranges are not deleted
+
+test('the Settings tab moves a named range, never deletes it', () => {
+  // Deleting a named range rewrites every formula that referenced it to the
+  // literal text #REF!, and re-creating the name cannot undo that. Doing it on
+  // every run shredded the lane formulas the previous run had written.
+  const c = cfg();
+  const plan = G.layoutSettings(c);
+  const removed = [];
+  const moved = [];
+  const created = [];
+  const sheetId = 7;
+  const mkRange = (a1) => ({
+    getA1Notation: () => a1,
+    getSheet: () => ({ getSheetId: () => sheetId }),
+  });
+  const sh = {
+    getSheetId: () => sheetId,
+    getRange: (row, col, nr, nc) => mkRange(`R${row}C${col}:${nr || 1}x${nc || 1}`),
+  };
+  const existing = plan.dials.map((d) => ({
+    getName: () => d.name,
+    getRange: () => mkRange('somewhere-else'),
+    setRange: () => moved.push(d.name),
+    remove: () => removed.push(d.name),
+  }));
+  const ss = {
+    getNamedRanges: () => existing,
+    setNamedRange: (n) => created.push(n),
+  };
+
+  G.nameSettingsRanges(ss, sh, plan);
+
+  assert.deepEqual(removed, [],
+    'a named range that formulas depend on must never be removed');
+  assert.ok(moved.length > 0, 'existing names are re-pointed in place');
+  assert.ok(created.length > 0, 'names that do not exist yet are created');
+});
+
+// ------------------------------------------------------- the 101-4001 floor
+
+const FLOOR_SKU = '101-4001';
+
+test('AWD > FBA fills a unit floor its own passes would have ignored', () => {
+  const c = cfg();
+  // 20 units at FBA against a 100-unit floor. Days of cover say 20 against a
+  // baseline of 60, so pass 3 asks for 40 — the floor asks for 80.
+  const rows = harmonise('AWD_TO_FBA', [awdFbaRow({
+    sku: FLOOR_SKU, rate: 1, trueRate30: 1, caseQty: 1,
+    amzFulfillable: 20, amzReserved: 0, amzInbound: 0, awdAvailableUnits: 500,
+  })]);
+
+  const rules = G.planAwdToFba(rows, c, {}).map((d) => Math.max(0, d.cases));
+  const wb = buildWorkbook(gs, c, { awdToFba: rows });
+  const sheet = sheetCases(wb, c, 'AWD_TO_FBA', rows);
+
+  assert.deepEqual(sheet, [80], 'the sheet tops it up to the floor');
+  assert.deepEqual(rules, [80], 'and so does the rule engine');
+
+  const W = G.laneWorkColumns(c, 'AWD_TO_FBA');
+  assert.equal(cell(wb, c, 'AWD_TO_FBA', W.NEEDED, 8), 80,
+    'and the target column reads as the floor, not as days of cover');
+});
+
+test('Tactical > FBA fills what AWD could not, and nothing more', () => {
+  const c = cfg();
+  const base = {
+    sku: FLOOR_SKU, rate: 1, trueRate30: 1, caseQty: 1,
+    amzFulfillable: 20, amzReserved: 0, amzInbound: 0,
+  };
+
+  // AWD holds 30 units, so it can only cover 30 of the 80 shortfall.
+  const awd = harmonise('AWD_TO_FBA', [awdFbaRow({ ...base, awdAvailableUnits: 30 })]);
+  const tac = harmonise('TAC_TO_FBA', [tacFbaRow({
+    ...base, awdAvailableUnits: 30, tacAvailableUnits: 1000, minUnits: 0,
+  })]);
+
+  const awdDec = G.planAwdToFba(awd, c, {});
+  const awdBySku = {};
+  awd.forEach((r, i) => {
+    awdBySku[G.normSku(r.sku)] = {
+      cases: awdDec[i].cases,
+      units: Math.max(0, awdDec[i].cases) * r.caseQty,
+      cappedByAwdStock: !!awdDec[i].cappedByAwdStock,
+      shortfallCases: awdDec[i].shortfallCases || 0,
+      awdAvailableUnits: r.awdAvailableUnits,
+    };
+  });
+  const rules = G.planTacToFba(tac, c, {}, awdBySku, {}).map((d) => Math.max(0, d.cases));
+
+  const wb = buildWorkbook(gs, c, { awdToFba: awd, tacToFba: tac });
+  assert.deepEqual(sheetCases(wb, c, 'AWD_TO_FBA', awd), [30], 'AWD sends all it has');
+  assert.deepEqual(sheetCases(wb, c, 'TAC_TO_FBA', tac), [50],
+    'Tactical covers the remaining 50 units of the floor');
+  assert.deepEqual(rules, [50], 'and the rule engine agrees');
+});
+
+test('Tactical > FBA stays out when AWD is filling the floor by itself', () => {
+  const c = cfg();
+  const base = {
+    sku: FLOOR_SKU, rate: 1, trueRate30: 1, caseQty: 1,
+    amzFulfillable: 20, amzReserved: 0, amzInbound: 0,
+  };
+  const awd = harmonise('AWD_TO_FBA', [awdFbaRow({ ...base, awdAvailableUnits: 500 })]);
+  const tac = harmonise('TAC_TO_FBA', [tacFbaRow({
+    ...base, awdAvailableUnits: 500, tacAvailableUnits: 1000, minUnits: 0,
+  })]);
+
+  const wb = buildWorkbook(gs, c, { awdToFba: awd, tacToFba: tac });
+  assert.deepEqual(sheetCases(wb, c, 'AWD_TO_FBA', awd), [80]);
+  assert.deepEqual(sheetCases(wb, c, 'TAC_TO_FBA', tac), [0],
+    'the floor is met once between the two lanes, not twice');
+});
+
+test('a unit floor is not stopped by the residual or inbound gates', () => {
+  const c = cfg();
+  // AWD holds nothing and has replenishment landing inside 14 days, which
+  // normally shuts this lane. The floor is not a replenishment judgement.
+  const tac = harmonise('TAC_TO_FBA', [tacFbaRow({
+    sku: FLOOR_SKU, rate: 1, trueRate30: 1, caseQty: 1,
+    amzFulfillable: 20, amzReserved: 0, amzInbound: 0,
+    awdAvailableUnits: 0, tacAvailableUnits: 1000, minUnits: 0,
+  })]);
+  const tacAwd = harmonise('TAC_TO_AWD', [tacAwdRow({
+    sku: FLOOR_SKU, rate: 1, caseQty: 1, awdQty: 0, awdInbound14: 400,
+    tacAvailableUnits: 1000, minUnits: 0, fbaDoi: 20,
+  })]);
+
+  const wb = buildWorkbook(gs, c, { tacToFba: tac, tacToAwd: tacAwd });
+  assert.deepEqual(sheetCases(wb, c, 'TAC_TO_FBA', tac), [80]);
+
+  const rules = G.planTacToFba(tac, c, {}, {}, { [FLOOR_SKU]: 400 })
+    .map((d) => Math.max(0, d.cases));
+  assert.deepEqual(rules, [80], 'the rule engine walks past the same gates');
+});

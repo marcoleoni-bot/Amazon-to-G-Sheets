@@ -77,6 +77,21 @@ function casesIn(units, caseQty) {
   return Math.floor(units / caseQty);
 }
 
+/**
+ * A per-SKU minimum number of units to hold at FBA, or 0.
+ *
+ * These exist for reasons no days-of-cover figure knows about — 101-4001 is
+ * held at 100 units on a marketing call — so the number is a hard minimum that
+ * outranks every DOI rule on every lane, not a target one lane happens to
+ * apply. Both lanes that can reach FBA read it from here.
+ */
+function unitFloorFor(sku, R) {
+  var map = (R && R.FBA_MIN_UNITS_BY_SKU) || {};
+  var v = map[normSku(sku)];
+  if (!(v > 0)) v = map[String(sku === null || sku === undefined ? '' : sku).trim()];
+  return v > 0 ? v : 0;
+}
+
 /** Days of inventory. No rate means no finite DOI, which is not the same as 0. */
 function doi(units, rate) {
   if (!(rate > 0)) return Infinity;

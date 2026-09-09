@@ -248,6 +248,8 @@ function formulasAwdToFba(row, cfg) {
     iff(numRef(C.AMZ_RESERVED, row) + '>0', '1E+99', '0'));
 
   var priority = 'OR(' + truthyRef(C.B2B, row) + ',' + truthyRef(C.CRITICAL, row) + ')';
+  var floorUnits = 'IFERROR(VLOOKUP(' + cellRef(C.NAME, row) + ','
+    + SETTINGS_NAMES.FBA_MIN_UNITS + ',2,FALSE),0)';
 
   f[W.PASS] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
     iff(rate + '<=0', '0',
@@ -279,12 +281,20 @@ function formulasAwdToFba(row, cfg) {
         iff(gap + '>0', 'ROUNDUP(' + gap + '*' + rate + '/' + cq + ',0)', '0'))));
   var p3 = 'MIN(' + ladder + ',' + ceiling + ')';
 
+  // A per-SKU unit floor at FBA is a minimum to hold, not a days-of-cover
+  // judgement, so it is met here — on the lane that normally feeds FBA — and
+  // it beats the passes and the 110 ceiling alike. It reaches the quantity
+  // through the target column, so `Cases needed to reach the target` already
+  // reads as the floor requirement and the shortfall carried to Tactical > FBA
+  // is measured against the floor too.
+  var floorNeed = iff(floorUnits + '>0', numRef(W.NEEDED, row), '0');
+
   f[C.CASES_OUT] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
     iff(rate + '<=0', '0',
       iff(cq + '<=0', '0',
-        'MAX(0,MIN(' + numRef(C.AVAILABLE_CASES, row) + ','
+        'MAX(0,MIN(' + numRef(C.AVAILABLE_CASES, row) + ',MAX(' + floorNeed + ','
           + iff(numRef(W.PASS, row) + '=1', p1,
-            iff(numRef(W.PASS, row) + '=2', p2, p3)) + '))')));
+            iff(numRef(W.PASS, row) + '=2', p2, p3)) + ')))')));
 
   // What this lane leaves on the table, and whether AWD stock is the reason.
   //
@@ -296,12 +306,21 @@ function formulasAwdToFba(row, cfg) {
   // nobody can read is no more visible than a pasted value — and "what is this
   // SKU aiming at" and "how far short is it" are worth seeing on the row.
   f[W.TARGET] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
-    iff(priority, SETTINGS_NAMES.PRIORITY_DOI, dss));
+    iff(rate + '<=0', '""',
+      iff(floorUnits + '>0', floorUnits + '/' + rate,
+        iff(priority, SETTINGS_NAMES.PRIORITY_DOI, dss))));
 
+  // With a unit floor the requirement is counted in units, not derived back
+  // out of the target's days of cover: (floor/rate − total/rate) × rate is
+  // floor − total only in exact arithmetic, and one ULP the wrong way rounds
+  // up to an extra case.
   f[W.NEEDED] = '=' + iff(cellRef(C.NAME, row) + '=""', '""',
     iff('OR(' + rate + '<=0,' + cq + '<=0)', '0',
-      'MAX(0,ROUNDUP((' + numRef(W.TARGET, row) + '-' + numRef(C.AMZ_DOI, row)
-        + ')*' + rate + '/' + cq + ',0))'));
+      iff(floorUnits + '>0',
+        'MAX(0,ROUNDUP((' + floorUnits + '-' + numRef(C.AMZ_TOTAL, row)
+          + ')/' + cq + ',0))',
+        'MAX(0,ROUNDUP((' + numRef(W.TARGET, row) + '-' + numRef(C.AMZ_DOI, row)
+          + ')*' + rate + '/' + cq + ',0))')));
 
   var short = 'MAX(0,' + numRef(W.NEEDED, row) + '-' + numRef(C.CASES_OUT, row) + ')';
   var freeUnits = 'MAX(0,' + numRef(C.AWD_AVAILABLE, row) + '-'
@@ -377,8 +396,10 @@ function formulasTacToFba(row, cfg) {
   var target = numRef(W.TARGET, row);
   var ceiling = numRef(W.CEILING, row);
 
+  // The unit floor nets off whatever AWD > FBA is already sending this run —
+  // column X — so the two lanes fill it once between them rather than twice.
   var toFloor = 'MAX(0,ROUNDUP((' + floorUnits + '-' + numRef(C.AMZ_TOTAL, row)
-    + ')/' + cq + ',0))';
+    + '-' + numRef(C.TO_AWD_TO_FBA, row) + ')/' + cq + ',0))';
   // Liquidating: push stock down towards the aim, whatever the cover says.
   var toAim = 'MAX(1,FLOOR((' + target + '-' + amzDoi + ')*' + rate + '/' + cq + '))';
   var toTarget = iff(amzDoi + '>=' + target, '0', toAim);
@@ -398,10 +419,20 @@ function formulasTacToFba(row, cfg) {
   // before Tactical stock and the floor do. Kept as its own column because it
   // is the number the floor-breach test reads, and because "wanted 20, sending
   // 10" is the question the reason column keeps being asked.
+  //
+  // A SKU with a unit floor walks past all three of them. The residual gate
+  // asks whether AWD could have covered a *days-of-cover* target, and the
+  // inbound gate asks whether replenishment is on its way to AWD; neither is
+  // the question when the instruction is "never hold fewer than 100 units at
+  // FBA". The spike ceiling is skipped for the same reason: the floor is both
+  // the target and the ceiling, and rounding up to a whole case is exactly the
+  // indivisible-case allowance every other lane gets. What is left is the
+  // arithmetic — the floor, less what is at FBA, less what AWD is sending.
   f[W.PROPOSED] = '=' + iff(sku + '=""', '""',
     iff('OR(' + rate + '<=0,' + cq + '<=0)', '0',
-      iff(numRef(W.RESIDUAL, row) + '<=0', '0',
-        iff(inbound + '>0', '0', 'MAX(0,' + afterSpike + ')'))));
+      iff(floorUnits + '>0', raw,
+        iff(numRef(W.RESIDUAL, row) + '<=0', '0',
+          iff(inbound + '>0', '0', 'MAX(0,' + afterSpike + ')')))));
 
   var proposed = numRef(W.PROPOSED, row);
 

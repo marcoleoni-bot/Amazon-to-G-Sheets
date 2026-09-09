@@ -15,6 +15,17 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
     if (!(r.rate > 0)) return decision(0, 'no order_plan_rate', { pass: 'NONE' });
     if (r.caseQty <= 0) return decision(0, 'no case size', { pass: 'NONE' });
 
+    // ---- the unit floor, which none of the gates below get to argue with --
+    //
+    // The residual gate asks whether AWD could have covered a days-of-cover
+    // target, and the inbound gate asks whether replenishment is on its way
+    // to AWD. Neither is the question when the instruction is "never hold
+    // fewer than 100 units at FBA", so a SKU with a floor skips both and is
+    // simply topped up to it — less whatever AWD is sending this run, so the
+    // two lanes fill it once between them.
+    var floorUnits = unitFloorFor(r.sku, R);
+    if (floorUnits > 0) return unitFloorDecision(r, floorUnits, awdBySku);
+
     // ---- gate 1: AWD could not cover it, for want of AWD stock -----------
     var cover = awdCoverage(r, awdBySku);
     if (!cover.uncovered) {
@@ -30,21 +41,13 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
 
     // ---- quantity --------------------------------------------------------
     var t = fbaTarget(r, dss, R);
-    if (!t.unitFloor && !t.liquidating && r.amzDoi >= t.target) {
+    if (!t.liquidating && r.amzDoi >= t.target) {
       return decision(0, 'already ' + fmt(r.amzDoi) + ' DOI (target '
         + t.target + ')', { pass: 'NONE' });
     }
 
     var cases;
-    if (t.unitFloor) {
-      // Fill to the unit floor, rounding up — 101-4001 went 55 -> 100 as 45
-      // one-unit cases on 08-13.
-      cases = clampMin0(roundUp((t.unitFloor - r.amzTotal) / r.caseQty));
-      if (cases === 0) {
-        return decision(0, 'already ' + fmt(r.amzTotal) + ' units at FBA (floor '
-          + t.unitFloor + ')', { pass: 'NONE' });
-      }
-    } else if (t.minimumOnly || R.TAC_TO_FBA_QTY_MODE === 'single_case') {
+    if (t.minimumOnly || R.TAC_TO_FBA_QTY_MODE === 'single_case') {
       cases = 1;
     } else {
       cases = Math.max(1, Math.floor((t.target - r.amzDoi) * r.rate / r.caseQty));
@@ -58,9 +61,7 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
         + ' DOI (>' + fmt(t.ceiling) + ')', { pass: 'NONE' });
     }
 
-    var how = t.unitFloor
-      ? 'to the ' + t.unitFloor + '-unit floor, '
-      : (t.liquidating ? 'liquidating discontinued stock, to ' : 'to ');
+    var how = t.liquidating ? 'liquidating discontinued stock, to ' : 'to ';
     var d = decision(cases, 'residual after AWD, ' + cover.why, {
       pass: 'PASS_2',
       notes: ['no inbound within 14 days',
@@ -99,15 +100,41 @@ function planTacToFba(rows, cfg, ltfIndex, awdBySku, inbound14BySku) {
  * So discontinued SKUs get the minimum viable quantity and a hard ceiling,
  * while the other two get a target with the usual single-case allowance.
  */
-function fbaTarget(r, dss, R) {
-  // A per-SKU unit floor beats every DOI rule — it exists precisely because
-  // days-of-cover is the wrong measure for that line.
-  var floorUnits = R.FBA_MIN_UNITS_BY_SKU[normSku(r.sku)]
-    || R.FBA_MIN_UNITS_BY_SKU[String(r.sku).trim()];
-  if (floorUnits > 0) {
-    return { target: doi(floorUnits, r.rate), ceiling: doi(floorUnits, r.rate),
-      minimumOnly: false, unitFloor: floorUnits };
+/**
+ * Top a SKU up to its unit floor at FBA, less whatever AWD is sending.
+ *
+ * Reached before any of the residual gates, because the floor is not a
+ * replenishment judgement — it is a count of stock somebody has decided must
+ * be there. Tactical stock still caps it, and the Tactical floor still binds
+ * it in Allocate.gs.
+ */
+function unitFloorDecision(r, floorUnits, awdBySku) {
+  var awd = awdBySku[normSku(r.sku)];
+  var fromAwd = awd ? (awd.units || 0) : 0;
+  var cases = clampMin0(roundUp((floorUnits - r.amzTotal - fromAwd) / r.caseQty));
+
+  if (cases === 0) {
+    return decision(0, fromAwd > 0
+      ? 'AWD is filling the ' + floorUnits + '-unit floor (' + fmt(fromAwd) + ' units)'
+      : 'already ' + fmt(r.amzTotal) + ' units at FBA (floor ' + floorUnits + ')',
+      { pass: 'NONE' });
   }
+
+  var d = decision(cases, 'to the ' + floorUnits + '-unit floor at FBA', {
+    pass: 'PASS_2',
+    notes: [fmt(r.amzTotal) + ' units at FBA'
+      + (fromAwd > 0 ? ', ' + fmt(fromAwd) + ' coming from AWD' : '')],
+  });
+
+  if (d.cases > r.availableCases) {
+    d.cases = clampMin0(r.availableCases);
+    addNote(d, d.cases === 0 ? 'no Tactical stock' : 'capped by Tactical stock');
+    addFlag(d, 'NEEDS_REVIEW');
+  }
+  return d;
+}
+
+function fbaTarget(r, dss, R) {
   if (isDiscontinued(r)) {
     // Liquidating: push stock down, aim under 50 days, never past 110.
     return { target: R.DISCONTINUED_AIM_FBA_DOI,
