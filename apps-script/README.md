@@ -198,6 +198,26 @@ node --test test/planner-formulas.test.js    # 40 formula tests
 
 ## How far the formulas run
 
+Every count is taken from the **SKU column**, stopping after
+`LANE_BLANK_RUN` (25) consecutive blanks — never from `getLastRow()`, on the
+planner or on the IMS. Both lie in the same way: the IMS
+`US TO Tactical > AWD` tab reports its last row as **5741** against 491 SKUs,
+because stray formulas sit below the data. Measuring it with `getLastRow()`
+pasted 5,734 rows into the planner, reported "5734 rows" on the run header, and
+handed that number on as the number of rows to calculate.
+
+When the sheet and the refresh disagree, the **smaller, SKU-counted** number
+wins. It used to take the larger, which is precisely backwards — the larger one
+is the broken one every time.
+
+After writing, one cell per lane is read back. If the transfer column holds no
+formula, or holds one carrying `#REF!`, the lane is written again; if it still
+fails, the run stops and names it. A lane has twice come out of a run with its
+headers in place and nothing calculated underneath, reporting success both
+times.
+
+## Earlier faults, and what they left behind
+
 Three separate things once got this wrong at once, on 09-09:
 
 - **The row count came from the sheet.** `getLastRow()` on the Tactical > AWD

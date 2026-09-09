@@ -802,3 +802,66 @@ test('a unit floor is not stopped by the residual or inbound gates', () => {
     .map((d) => Math.max(0, d.cases));
   assert.deepEqual(rules, [80], 'the rule engine walks past the same gates');
 });
+
+// ------------------------------------------- counting a lane's real data rows
+
+/** A sheet stub holding one column of values, plus a stray far below. */
+function stubSheet(col0, first, count, strayAt) {
+  const grid = [];
+  const put = (r, c, v) => {
+    while (grid.length < r) grid.push([]);
+    grid[r - 1][c] = v;
+  };
+  for (let i = 0; i < count; i++) put(first + i, col0, `SKU-${i}`);
+  if (strayAt) put(strayAt, col0, 'stray');
+  const lastRow = strayAt || (first + count - 1);
+  return {
+    getLastRow: () => lastRow,
+    getRange: (row, col, rows) => ({
+      getValues: () => {
+        const out = [];
+        for (let r = row; r < row + rows; r++) out.push([(grid[r - 1] || [])[col - 1] ?? '']);
+        return out;
+      },
+    }),
+  };
+}
+
+test('countDataRows stops at the last SKU, on any tab', () => {
+  const c = cfg();
+  const first = c.LAYOUT.LANE_FIRST_DATA_ROW;
+
+  // The IMS Tactical > AWD tab: 491 SKUs, stray formulas down to row 5741.
+  const ims = stubSheet(1, first, 491, 5741);
+  assert.equal(G.countDataRows(ims, 1, first), 491,
+    'the IMS tab reports 5741 as its last row; it holds 491 SKUs');
+
+  // And the planner's own lane, keyed on its own SKU column.
+  const lane = stubSheet(c.COLS.TAC_TO_AWD.NAME, first, 491, 5741);
+  assert.equal(G.laneRowCount(lane, 'TAC_TO_AWD', c), 491);
+
+  assert.equal(G.countDataRows(stubSheet(1, first, 0, 0), 1, first), 0,
+    'an empty tab counts as none');
+});
+
+test('a lane whose formulas did not land is reported, not returned as ok', () => {
+  const c = cfg();
+  const first = c.LAYOUT.LANE_FIRST_DATA_ROW;
+  const casesCol = c.COLS.AWD_TO_FBA.CASES_OUT + 1;
+
+  const empty = { getRange: () => ({ getFormula: () => '' }) };
+  assert.match(G.laneFormulaHealth(empty, 'AWD_TO_FBA', c) || '',
+    /holds no formula/, 'a blank transfer column is a failure, not a plan');
+
+  const broken = {
+    getRange: () => ({ getFormula: () => '=IF(N($J8)+N($O8)<#REF!,1,0)' }),
+  };
+  assert.match(G.laneFormulaHealth(broken, 'AWD_TO_FBA', c) || '', /#REF!/,
+    'a formula carrying #REF! is a failure too');
+
+  const good = {
+    getRange: () => ({ getFormula: () => '=IF($C8="","",MAX(0,Dss_BaselineDoi))' }),
+  };
+  assert.equal(G.laneFormulaHealth(good, 'AWD_TO_FBA', c), null);
+  assert.ok(casesCol > 0);
+});

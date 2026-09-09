@@ -484,18 +484,19 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
     return { lane: laneKey, ok: false, note: 'Connected Sheet — cannot write formulas' };
   }
 
-  // The count is settled here, against the sheet, rather than taken on trust.
-  // A hint from the refresh (which knows exactly how many rows it pasted) wins
-  // over the scan; the scan is the fallback when there was no refresh.
+  // The count is settled against the SKUs actually on the tab. The hint from
+  // the refresh is only a fallback for when there was no refresh at all.
+  //
+  // It used to take the larger of the two, which is precisely backwards: the
+  // larger number is the broken one every time. On 09-09 the refresh reported
+  // 5,734 rows for Tactical > AWD — it had read the IMS tab's last row rather
+  // than its last SKU — and taking the maximum spread transfer formulas over
+  // all of them.
   var counted = laneRowCount(sheet, laneKey, cfg);
-  var rows = (rowCount > 0) ? rowCount : counted;
+  var rows = counted > 0 ? counted : rowCount;
   if (rows <= 0) {
     return { lane: laneKey, ok: false,
       note: 'no SKUs on the tab — nothing to calculate' };
-  }
-  if (counted > 0 && rowCount > 0 && counted !== rowCount) {
-    // Not fatal, but worth saying: the two disagree about where the data ends.
-    rows = Math.max(counted, rowCount);
   }
 
   var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
@@ -535,10 +536,55 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
   });
 
   writeWorkHeaders(sheet, laneKey, cfg);
+
+  // Read one cell back and check the sheet actually took it.
+  //
+  // Twice now a lane has come out of a run with its headers in place and not
+  // one calculated cell underneath, and twice the run reported success. A
+  // write that does not land is not a theory worth debugging in production —
+  // it is a thing to check for, retry once, and then refuse to pretend about.
+  var ill = laneFormulaHealth(sheet, laneKey, cfg);
+  if (ill) {
+    SpreadsheetApp.flush();
+    Object.keys(byColumn).forEach(function (col) {
+      sheet.getRange(first, Number(col) + 1, rows, 1).setFormulas(byColumn[col]);
+    });
+    SpreadsheetApp.flush();
+    ill = laneFormulaHealth(sheet, laneKey, cfg);
+  }
+  if (ill) {
+    return { lane: laneKey, ok: false, rows: rows,
+      note: ill + ' even after writing it twice' };
+  }
+
   return {
     lane: laneKey, ok: true, rows: rows, counted: counted, hinted: rowCount || 0,
     columns: Object.keys(byColumn).length,
   };
+}
+
+/**
+ * Is this lane's transfer column actually a working formula?
+ *
+ * Returns null when it is, or a sentence naming the problem. Two failures have
+ * been seen in the wild and both look identical from the script's side: the
+ * write silently not landing, and the formula landing but carrying `#REF!`
+ * where a named range used to be.
+ */
+function laneFormulaHealth(sheet, laneKey, cfg) {
+  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  var f;
+  try {
+    f = sheet.getRange(first, cfg.COLS[laneKey].CASES_OUT + 1).getFormula();
+  } catch (e) {
+    return 'the transfer column could not be read back (' + e.message + ')';
+  }
+  if (!f) return 'the transfer column holds no formula';
+  if (f.indexOf('#REF!') !== -1) {
+    return 'the transfer column formula carries #REF! where a named range '
+      + 'should be';
+  }
+  return null;
 }
 
 /**
@@ -571,12 +617,25 @@ var LANE_BLANK_RUN = 25;
  * contiguous, so a couple of dozen blanks in a row is the end of it.
  */
 function laneRowCount(sheet, laneKey, cfg) {
-  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+  return countDataRows(sheet, cfg.COLS[laneKey].NAME,
+    cfg.LAYOUT.LANE_FIRST_DATA_ROW);
+}
+
+/**
+ * Data rows in a tab, counted on one column: from `first` to the last value
+ * before a run of `LANE_BLANK_RUN` blanks.
+ *
+ * Used on the planner's lane tabs and on the IMS tabs feeding them, because
+ * both lie in the same way. The IMS `US TO Tactical > AWD` tab reports its
+ * last row as 5741 against 491 SKUs — the rows below carry stray formulas —
+ * so anything measuring it with getLastRow() copies five thousand empty rows
+ * and then calculates on them.
+ */
+function countDataRows(sheet, col0, first) {
   var last = sheet.getLastRow();
   if (last < first) return 0;
 
-  var vals = sheet.getRange(first, cfg.COLS[laneKey].NAME + 1, last - first + 1, 1)
-    .getValues();
+  var vals = sheet.getRange(first, col0 + 1, last - first + 1, 1).getValues();
   var lastSeen = 0;
   var blanks = 0;
   for (var i = 0; i < vals.length; i++) {

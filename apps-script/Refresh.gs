@@ -101,9 +101,25 @@ function refreshLane(ims, planner, laneKey, cfg) {
   var dstHeader = plannerSheet.getRange(headerRow, 1, 1, plannerSheet.getLastColumn())
     .getValues()[0].map(headerKey);
 
-  var srcLast = src.getLastRow();
-  if (srcLast < firstRow) return { lane: tabName, ok: false, note: 'IMS tab has no data' };
-  var srcRows = srcLast - firstRow + 1;
+  // How many rows the IMS tab really holds — counted on its SKU column, not
+  // taken from getLastRow().
+  //
+  // The IMS `US TO Tactical > AWD` tab reports its last row as 5741 against
+  // 491 SKUs; everything below carries stray formulas. Copying by getLastRow()
+  // pasted 5,734 rows into the planner, reported "5734 rows" on the run header,
+  // and handed that number on as the number of rows to calculate.
+  // Matched by header text: the IMS carries the SKU one column left of the
+  // planner, which adds its own columns on the left, so the planner's index
+  // is the wrong thing to reach for here.
+  var srcNameCol = srcHeader.indexOf(dstHeader[cfg.COLS[laneKey].NAME]);
+  if (srcNameCol === -1) srcNameCol = srcHeader.indexOf('name');
+  if (srcNameCol === -1) {
+    return { lane: tabName, ok: false,
+      note: 'the IMS tab has no "name" column to count SKUs on' };
+  }
+  var srcRows = countDataRows(src, srcNameCol, firstRow);
+  if (srcRows <= 0) return { lane: tabName, ok: false, note: 'IMS tab has no SKUs' };
+  var srcLast = firstRow + srcRows - 1;
   var srcValues = src.getRange(firstRow, 1, srcRows, src.getLastColumn()).getValues();
 
   var skip = (cfg.REFRESH.PRESERVE_COLS[laneKey] || []).slice();
@@ -126,10 +142,12 @@ function refreshLane(ims, planner, laneKey, cfg) {
   }
 
   // Anything below the incoming data is last run's tail — clear it, or the
-  // lane keeps SKUs the IMS no longer lists.
-  var dstLast = plannerSheet.getLastRow();
-  if (dstLast > srcLast) {
-    plannerSheet.getRange(srcLast + 1, 1, dstLast - srcLast,
+  // lane keeps SKUs the IMS no longer lists. Measured against the bottom of
+  // the grid rather than getLastRow(), which is the number a previous
+  // over-long paste has already inflated.
+  var below = plannerSheet.getMaxRows() - srcLast;
+  if (below > 0) {
+    plannerSheet.getRange(srcLast + 1, 1, below,
       plannerSheet.getMaxColumns()).clearContent();
   }
 
