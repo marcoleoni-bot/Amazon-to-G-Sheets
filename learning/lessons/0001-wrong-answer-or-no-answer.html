@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 · Wrong answer, or no answer?</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header>
+  <p class="kicker">Lesson 1 · Debugging Sheets automation</p>
+  <h1>Wrong answer, or no answer?</h1>
+  <p class="lede">Almost every failure in the transfer-order planner is one of
+  two things. Telling them apart takes about thirty seconds, and it decides
+  everything you do next.</p>
+</header>
+
+<main>
+
+<h2>The two shapes</h2>
+
+<p>When a run comes back wrong, the cell you are staring at is in one of two
+states. They look identical at a glance and they need opposite responses.</p>
+
+<div class="tables-scroll">
+<table>
+  <tr>
+    <th></th>
+    <th>Wrong answer</th>
+    <th>No answer written</th>
+  </tr>
+  <tr>
+    <th>What happened</th>
+    <td>The script ran, calculated, and wrote a number you disagree with.</td>
+    <td>The script ran, and the cell was never touched. What you see is whatever
+    was there before.</td>
+  </tr>
+  <tr>
+    <th>Whose fault</th>
+    <td>The <em>rules</em>. A threshold, a gate, a target.</td>
+    <td>The <em>environment</em>. Something in the sheet blocked the write.</td>
+  </tr>
+  <tr>
+    <th>Fix lives in</th>
+    <td>The Settings tab, or the rule code.</td>
+    <td>The sheet itself — a filter, a named range, a protected cell.</td>
+  </tr>
+</table>
+</div>
+
+<p>The trap is that <strong>a blocked write raises no error</strong>. Nothing
+turns red. The tab looks finished. That is why these took weeks to find: the
+planner was reporting success over cells it had never managed to change.</p>
+
+<h2>The question that separates them</h2>
+
+<blockquote>Is this cell holding what the script wrote, or what was there
+before?</blockquote>
+
+<p>You answer it by clicking the cell and reading the <strong>formula bar</strong>
+— not the value in the grid. The value is the same either way. The formula is
+not.</p>
+
+<p>Here is the actual cell that cracked the September bug. Column P of
+<code>US TO AWD &gt; FBA</code>, the transfer-cases column:</p>
+
+<pre><code>=ROUNDUP((100-O8)*F8/Q8,0)</code></pre>
+
+<p>That is the <em>old template's</em> formula, from before any of this
+automation existed. The current script writes something that starts
+<code>=IF($C8="","",IF(N($F8)&lt;=0,…</code>. One glance at the formula bar said
+the write had been dropped. The value in the cell said nothing at all.</p>
+
+<div class="card">
+  <h3>The one habit worth building</h3>
+  <p>When a cell looks wrong, click it and copy the formula bar. Paste that
+  line to Claude. It is the single highest-information artefact you can send,
+  and it costs five seconds.</p>
+</div>
+
+<h2>The worked example</h2>
+
+<p>Symptom: Tactical &gt; FBA came back with no calculated columns at all, three
+runs in a row, while the other two lanes were fine.</p>
+
+<p>The thing that distinguished the broken lane from the working ones was not
+in the code. It was this, sitting on the tab:</p>
+
+<pre><code>FILTER over A7:Z498
+  showing only rows where column Q is 3 or 7</code></pre>
+
+<p>A filter <strong>hides rows</strong>. On the run before, exactly two rows out
+of 491 received their formulas — rows 37 and 154, the only two the filter left
+visible. A later copy of the same template carried a filter with an
+<em>empty</em> criteria list, which hides everything, and then not one of the
+fourteen columns would take a formula.</p>
+
+<p>The two lanes that always worked both carried filters too — with
+<em>no criteria set</em>. Nothing hidden, nothing lost.</p>
+
+<p class="aside">Honest caveat: this is the correlation the evidence in your
+workbooks shows, and removing the filter fixes it. Google does not advertise
+this behaviour anywhere prominent, which is exactly the point — the lesson is
+not "remember the filter rule", it is "a write can vanish without saying so".</p>
+
+<h2>Practise</h2>
+
+<p class="score" data-score>0 of 3 answered</p>
+
+<div class="quiz" data-quiz>
+  <p class="q">A transfer column shows 0 where you expected 6 cases. You click
+  the cell. The formula bar reads <code>0</code>. What is this?</p>
+  <button class="opt" data-correct>No answer written — nothing calculated here</button>
+  <button class="opt">A wrong answer — the rules decided zero</button>
+  <button class="opt">A wrong answer — the rate must be stale</button>
+  <div class="why">A calculated cell always holds a formula. A bare
+  <code>0</code> in the formula bar means no formula was ever written — a
+  pasted value, or last run's leftover. Look at the environment, not the rules.</div>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="q">Same column, another row. The formula bar shows a long
+  <code>=IF($C8="",…)</code> formula and the cell reads 0. What is this?</p>
+  <button class="opt" data-correct>A wrong answer — argue with the rule</button>
+  <button class="opt">No answer written — the write was dropped</button>
+  <button class="opt">No answer written — the filter hid it</button>
+  <div class="why">The script's own formula is there and it evaluated to zero.
+  That is a decision, not a failure. Read the Reason column next to it; it will
+  tell you which gate closed.</div>
+</div>
+
+<div class="quiz" data-quiz>
+  <p class="q">Two lanes are perfect and one is empty. What does the contrast
+  tell you?</p>
+  <button class="opt" data-correct>Look at what differs between those tabs</button>
+  <button class="opt">Look at the rules for the empty lane</button>
+  <button class="opt">Look at whether the IMS data loaded</button>
+  <div class="why">Same code ran over all three. If one tab is broken and two
+  are not, the cause is on the tab — a filter, a protection, hidden rows — not
+  in logic that all three share. Contrast is the cheapest diagnosis there is.</div>
+</div>
+
+<h2>What to send Claude</h2>
+
+<p>Four things, in this order. The first two are usually enough.</p>
+
+<ol>
+  <li><strong>The exact error text</strong>, copied whole. Your message
+  <em>"…these columns would not take a formula, twice over: J, K, O, P…"</em>
+  was what turned a week of guessing into a ten-minute fix: <em>all fourteen</em>
+  columns failing meant the whole tab, not the formulas.</li>
+  <li><strong>One formula from the formula bar</strong>, from a cell that looks
+  wrong.</li>
+  <li><strong>The file link.</strong> Claude can open your sheets and read the
+  filters, protections and named ranges directly.</li>
+  <li><strong>Which tabs are right and which are wrong.</strong> The contrast
+  is half the answer.</li>
+</ol>
+
+<p>What <em>not</em> to lead with: a screenshot of the grid. It shows values,
+and values are the one thing that looks the same in both failure modes.</p>
+
+<div class="card">
+  <h3>Your tangible win</h3>
+  <p>Next time a run looks wrong, before you write to Claude: click one bad
+  cell, read the formula bar, and decide <em>wrong answer</em> or <em>no answer</em>.
+  Say which in your first sentence. That sentence alone removes most of the
+  round trip.</p>
+</div>
+
+</main>
+
+<footer>
+  <p><strong>Read next:</strong>
+  <a href="../reference/evidence-checklist.html">Evidence checklist</a> — the
+  printable one-pager version of this lesson.</p>
+
+  <p><strong>Primary source:</strong>
+  <a href="https://developers.google.com/apps-script/reference/spreadsheet/sheet#getfilter">
+  <code>Sheet.getFilter()</code></a> in the Apps Script reference — the API the
+  fix now calls before every write. Worth two minutes to see how small the
+  surface is that caused this much trouble.</p>
+
+  <p><strong>Stuck on anything here?</strong> Ask me. I am your teacher for
+  this, and a half-formed question is a perfectly good one — "why does a filter
+  even matter to a script?" is a better use of five minutes than re-reading
+  this page.</p>
+</footer>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

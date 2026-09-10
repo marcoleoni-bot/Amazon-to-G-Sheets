@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference · Evidence checklist</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<header>
+  <p class="kicker">Reference · print me</p>
+  <h1>When the planner comes back wrong</h1>
+  <p class="lede">Thirty seconds of triage, then the three things to send.</p>
+</header>
+
+<main>
+
+<h2>1 · Triage — click one bad cell, read the formula bar</h2>
+
+<div class="tables-scroll">
+<table>
+  <tr><th>Formula bar shows</th><th>Verdict</th><th>Where to look</th></tr>
+  <tr>
+    <td>A bare number, or blank</td>
+    <td><strong>No answer written</strong></td>
+    <td>The tab. Filter, protection, hidden rows.</td>
+  </tr>
+  <tr>
+    <td>A short formula you don't recognise</td>
+    <td><strong>No answer written</strong> — leftover</td>
+    <td>The write was dropped; the old template's formula survived.</td>
+  </tr>
+  <tr>
+    <td><code>=IF($C8="",…)</code> — long, starts with <code>IF</code></td>
+    <td><strong>Wrong answer</strong></td>
+    <td>The rules. Read the Reason column beside it.</td>
+  </tr>
+  <tr>
+    <td>A formula containing <code>#REF!</code></td>
+    <td><strong>Broken reference</strong></td>
+    <td>A named range was deleted. Re-run; it rebuilds them.</td>
+  </tr>
+</table>
+</div>
+
+<h2>2 · Check the tab before blaming the code</h2>
+
+<p>Same code runs over all three lanes. If one tab is wrong and the others are
+right, the cause is <em>on that tab</em>.</p>
+
+<ul>
+  <li><strong>Filter.</strong> Data → <em>Remove filter</em>. A filter hides
+  rows, and a hidden row will not accept a write.</li>
+  <li><strong>Hidden rows.</strong> Select all → right-click → unhide.</li>
+  <li><strong>Protected range.</strong> Data → Protected sheets and ranges.</li>
+  <li><strong>Stray content far below the data.</strong> Ctrl+↓ from a data
+  column. If it lands on row 5741 when you have 491 SKUs, that is the
+  problem.</li>
+</ul>
+
+<p class="aside">The planner now clears filters and unhides rows itself before
+every write, and names them on the Run header. If you see something in that
+list, that is why.</p>
+
+<h2>3 · Send Claude</h2>
+
+<ol>
+  <li>The <strong>exact error text</strong>, whole. Not paraphrased — the list
+  of column letters in it is the diagnosis.</li>
+  <li><strong>One formula</strong> copied from the formula bar of a bad cell.</li>
+  <li>The <strong>file link</strong>.</li>
+  <li>Which tabs are <strong>right</strong> and which are <strong>wrong</strong>.</li>
+</ol>
+
+<p>Open with one sentence: <em>"Tac&nbsp;&gt;&nbsp;FBA has no formulas at all,
+the other two lanes are fine."</em> That sentence is worth more than a page of
+description.</p>
+
+<h2>The three traps in this project</h2>
+
+<div class="tables-scroll">
+<table>
+  <tr><th>Trap</th><th>Looks like</th><th>Why</th></tr>
+  <tr>
+    <td>Filter on a tab</td>
+    <td>Some rows calculated, most not — or none at all</td>
+    <td>Writes skip rows a filter has hidden. Silently.</td>
+  </tr>
+  <tr>
+    <td>Named range deleted</td>
+    <td><code>#REF!</code> sitting inside otherwise-normal formulas</td>
+    <td>Deleting a name rewrites every formula that used it, on the spot.</td>
+  </tr>
+  <tr>
+    <td><code>getLastRow()</code> counting junk</td>
+    <td>Formulas running thousands of rows past the data</td>
+    <td>Stray cells far below the SKUs stretch the sheet's idea of "last row".</td>
+  </tr>
+</table>
+</div>
+
+<h2>The one-line principle</h2>
+
+<blockquote>An error tells you something failed. A silent no-op tells you
+nothing — so look for what did <em>not</em> change.</blockquote>
+
+</main>
+
+<footer>
+  <p><a href="../lessons/0001-wrong-answer-or-no-answer.html">Lesson 1 · Wrong
+  answer, or no answer?</a> — the reasoning behind this page.</p>
+  <p>Questions are welcome any time. Ask me.</p>
+</footer>
+
+</body>
+</html>
