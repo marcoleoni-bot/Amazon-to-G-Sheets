@@ -531,30 +531,29 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
     });
   }
 
-  Object.keys(byColumn).forEach(function (col) {
-    sheet.getRange(first, Number(col) + 1, rows, 1).setFormulas(byColumn[col]);
-  });
+  writeColumnBlocks(sheet, byColumn, first, rows);
+
+  // Read every column back and compare it with what was meant to go there.
+  //
+  // Checking only that *a* formula is present is not enough, and the 09-09
+  // run is why: AWD > FBA's transfer column came back holding the template's
+  // own `ROUNDUP((100-O8)*F8/Q8,0)`. Our write to that one column had been
+  // dropped — silently, with no exception, while the other thirteen landed —
+  // and a "is it a formula?" test waved it through.
+  var missed = unwrittenColumns(sheet, byColumn, first);
+  if (missed.length) {
+    SpreadsheetApp.flush();
+    writeColumnBlocks(sheet, byColumn, first, rows);
+    SpreadsheetApp.flush();
+    missed = unwrittenColumns(sheet, byColumn, first);
+  }
 
   writeWorkHeaders(sheet, laneKey, cfg);
 
-  // Read one cell back and check the sheet actually took it.
-  //
-  // Twice now a lane has come out of a run with its headers in place and not
-  // one calculated cell underneath, and twice the run reported success. A
-  // write that does not land is not a theory worth debugging in production —
-  // it is a thing to check for, retry once, and then refuse to pretend about.
-  var ill = laneFormulaHealth(sheet, laneKey, cfg);
-  if (ill) {
-    SpreadsheetApp.flush();
-    Object.keys(byColumn).forEach(function (col) {
-      sheet.getRange(first, Number(col) + 1, rows, 1).setFormulas(byColumn[col]);
-    });
-    SpreadsheetApp.flush();
-    ill = laneFormulaHealth(sheet, laneKey, cfg);
-  }
-  if (ill) {
+  if (missed.length) {
     return { lane: laneKey, ok: false, rows: rows,
-      note: ill + ' even after writing it twice' };
+      note: 'these columns would not take a formula, twice over: '
+        + missed.map(function (c) { return colLetter(Number(c)); }).join(', ') };
   }
 
   return {
@@ -564,28 +563,61 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
 }
 
 /**
- * Is this lane's transfer column actually a working formula?
+ * Write the block, one call per run of adjacent columns.
  *
- * Returns null when it is, or a sentence naming the problem. Two failures have
- * been seen in the wild and both look identical from the script's side: the
- * write silently not landing, and the formula landing but carrying `#REF!`
- * where a named range used to be.
+ * Fourteen separate single-column writes per lane is fourteen chances for one
+ * to go missing; grouping the adjacent ones cuts AWD > FBA from fourteen calls
+ * to six and Tactical > AWD from eight to four.
  */
-function laneFormulaHealth(sheet, laneKey, cfg) {
-  var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
-  var f;
-  try {
-    f = sheet.getRange(first, cfg.COLS[laneKey].CASES_OUT + 1).getFormula();
-  } catch (e) {
-    return 'the transfer column could not be read back (' + e.message + ')';
+function writeColumnBlocks(sheet, byColumn, first, rows) {
+  var cols = Object.keys(byColumn).map(Number).sort(function (a, b) { return a - b; });
+  var i = 0;
+  while (i < cols.length) {
+    var j = i;
+    while (j + 1 < cols.length && cols[j + 1] === cols[j] + 1) j++;
+    var width = j - i + 1;
+    var block = [];
+    for (var r = 0; r < rows; r++) {
+      var row = [];
+      for (var k = i; k <= j; k++) row.push(byColumn[cols[k]][r][0]);
+      block.push(row);
+    }
+    sheet.getRange(first, cols[i] + 1, rows, width).setFormulas(block);
+    i = j + 1;
   }
-  if (!f) return 'the transfer column holds no formula';
-  if (f.indexOf('#REF!') !== -1) {
-    return 'the transfer column formula carries #REF! where a named range '
-      + 'should be';
-  }
-  return null;
 }
+
+/** Columns whose first row does not hold the formula we asked for. */
+function unwrittenColumns(sheet, byColumn, first) {
+  return Object.keys(byColumn).filter(function (col) {
+    var want = byColumn[col][0][0];
+    var got;
+    try {
+      got = sheet.getRange(first, Number(col) + 1).getFormula();
+    } catch (e) {
+      return true;
+    }
+    return !sameFormula(got, want);
+  });
+}
+
+/**
+ * Are these the same formula?
+ *
+ * Compared on a normalised prefix, because Sheets rewrites what it stores:
+ * `FLOOR(x)` comes back as `FLOOR(x,1)`, and whitespace moves. Twenty
+ * characters is past the opening `IF(` of every formula here and short of the
+ * first argument Sheets would touch — enough to tell ours from the template's,
+ * which is the distinction that matters.
+ */
+function sameFormula(got, want) {
+  var a = String(got || '').replace(/\s+/g, '').toUpperCase();
+  var b = String(want || '').replace(/\s+/g, '').toUpperCase();
+  if (!a) return false;
+  if (a.indexOf('#REF!') !== -1) return false;
+  return a.slice(0, 20) === b.slice(0, 20);
+}
+
 
 /**
  * How many data rows each lane actually has, counted on the SKU column.
@@ -807,5 +839,194 @@ function reconcileWithSheet(input, plan, cfg) {
     + countFlag(plan.tacToFba, 'NEEDS_REVIEW');
   plan.reconcile = out;
 
+  return out;
+}
+
+// ------------------------------------------------------------- output tabs
+
+/**
+ * The pick lists and CSV tabs, as formulas rather than pasted rows.
+ *
+ * They used to be written as values, which made them a photograph of the
+ * moment the plan was built. Change a case count on a lane afterwards — which
+ * is the whole point of proposing rather than deciding — and the pick list you
+ * actually type from still showed the old number.
+ *
+ * Each output column is its own `SORT(FILTER(...))` over the lane, filtered on
+ * "cases > 0" and sorted on days of cover at the destination. Every column
+ * uses the same filter and the same sort key, so the rows stay aligned; edit a
+ * case count, or type a quantity onto a SKU the plan skipped, and the row
+ * appears here on its own.
+ *
+ * Written without `{}` array literals or QUERY on purpose: the array
+ * separator is locale-dependent, and a sheet opened outside the US would break
+ * silently.
+ */
+function writeOutputFormulas(planner, cfg, rowsByLane) {
+  var out = [];
+  var stamp = plannerDate(planner.getName()) || new Date();
+  var date = 'DATE(' + stamp.getFullYear() + ',' + (stamp.getMonth() + 1) + ','
+    + stamp.getDate() + ')';
+
+  function lane(laneKey) {
+    var rows = rowsByLane[laneKey] || 0;
+    var first = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
+    return {
+      key: laneKey,
+      first: first,
+      // A little headroom past the data, so a SKU typed onto the bottom of a
+      // lane by hand still reaches the pick list.
+      last: first + Math.max(rows, 1) - 1 + 200,
+      col: function (col0) {
+        var L = colLetter(col0);
+        return quoteTab(cfg.TABS[laneKey]) + '!$' + L + '$' + this.first
+          + ':$' + L + '$' + this.last;
+      },
+    };
+  }
+
+  /** Rows on this lane with something to send. */
+  function sending(l, casesCol) {
+    return 'ARRAYFORMULA(N(' + l.col(casesCol) + ')>0)';
+  }
+
+  /** One output column: the lane column, filtered and sorted by urgency. */
+  function pick(l, col0, cond, sortCol) {
+    return '=IFERROR(SORT(FILTER(' + l.col(col0) + ',' + cond + '),FILTER('
+      + l.col(sortCol) + ',' + cond + '),TRUE),"")';
+  }
+
+  /** The same rows, run through a lookup — Amazon SKU, or the LTF comment. */
+  function lookup(l, nameCol, cond, sortCol, range, index) {
+    return '=IFERROR(ARRAYFORMULA(IFERROR(VLOOKUP(SORT(FILTER('
+      + l.col(nameCol) + ',' + cond + '),FILTER(' + l.col(sortCol) + ','
+      + cond + '),TRUE),' + range + ',' + index + ',FALSE),"")),"")';
+  }
+
+  /** A constant, repeated once per picked row and no further. */
+  function constant(l, nameCol, cond, sortCol, value) {
+    return '=IFERROR(ARRAYFORMULA(IF(LEN(SORT(FILTER(' + l.col(nameCol) + ','
+      + cond + '),FILTER(' + l.col(sortCol) + ',' + cond + '),TRUE))>0,'
+      + value + ',"")),"")';
+  }
+
+  var products = quoteTab(cfg.TABS.PRODUCTS) + '!$A:$B';
+  var ltf = quoteTab(cfg.TABS.LTF) + '!$B:$Q';
+
+  function emit(tabName, headerRow, formulas) {
+    var sh = sheetByName(planner, tabName);
+    if (!sh || !isGridSheet(sh)) {
+      out.push({ tab: tabName, ok: false, note: 'no such tab' });
+      return;
+    }
+    // Everything under the header is regenerated, so last week's rows cannot
+    // survive underneath this week's spill.
+    var below = sh.getMaxRows() - headerRow;
+    if (below > 0) {
+      var stale = sh.getRange(headerRow + 1, 1, below,
+        Math.max(sh.getMaxColumns(), formulas.length));
+      stale.clearContent();
+      stale.setBackground(null);
+    }
+    formulas.forEach(function (f, i) {
+      if (f) sh.getRange(headerRow + 1, i + 1).setFormula(f);
+    });
+    out.push({ tab: tabName, ok: true, columns: formulas.filter(String).length });
+  }
+
+  var H = cfg.LAYOUT.SUMMARY_HEADER_ROW;
+  var CH = cfg.LAYOUT.CSV_HEADER_ROW;
+
+  // ---- Tactical > AWD -----------------------------------------------------
+  var A = cfg.COLS.TAC_TO_AWD;
+  var la = lane('TAC_TO_AWD');
+  var aCond = sending(la, A.CASES_OUT);
+  emit(cfg.TABS.SUMMARY_TAC_AWD, H, [
+    pick(la, A.NAME, aCond, A.AWD_DOI),
+    pick(la, A.CASE_QTY, aCond, A.AWD_DOI),
+    pick(la, A.UNITS_OUT, aCond, A.AWD_DOI),
+    lookup(la, A.NAME, aCond, A.AWD_DOI, products, 2),
+    pick(la, A.CASES_OUT, aCond, A.AWD_DOI),
+    lookup(la, A.NAME, aCond, A.AWD_DOI, ltf, 16),
+  ]);
+  emit(cfg.TABS.CSV_TAC_AWD, CH, [
+    '',
+    constant(la, A.NAME, aCond, A.AWD_DOI, date),
+    constant(la, A.NAME, aCond, A.AWD_DOI,
+      '"' + cfg.OUTPUT.SHIP_METHOD_TAC_AWD + '"'),
+    pick(la, A.NAME, aCond, A.AWD_DOI),
+    pick(la, A.UNITS_OUT, aCond, A.AWD_DOI),
+    '',
+  ]);
+
+  // ---- AWD > FBA ----------------------------------------------------------
+  var F = cfg.COLS.AWD_TO_FBA;
+  var lf = lane('AWD_TO_FBA');
+  var fCond = sending(lf, F.CASES_OUT);
+  emit(cfg.TABS.SUMMARY_AWD_FBA, H, [
+    pick(lf, F.NAME, fCond, F.AMZ_DOI),
+    pick(lf, F.CASE_QTY, fCond, F.AMZ_DOI),
+    pick(lf, F.UNITS_OUT, fCond, F.AMZ_DOI),
+    pick(lf, F.CASES_OUT, fCond, F.AMZ_DOI),
+    lookup(lf, F.NAME, fCond, F.AMZ_DOI, ltf, 16),
+  ]);
+
+  // ---- Tactical > FBA -----------------------------------------------------
+  var T = cfg.COLS.TAC_TO_FBA;
+  var lt = lane('TAC_TO_FBA');
+  var tCond = sending(lt, T.CASES_OUT);
+  emit(cfg.TABS.SUMMARY_TAC_FBA, H, [
+    pick(lt, T.NAME, tCond, T.AMZ_DOI),
+    pick(lt, T.CASE_QTY, tCond, T.AMZ_DOI),
+    pick(lt, T.UNITS_OUT, tCond, T.AMZ_DOI),
+    lookup(lt, T.NAME, tCond, T.AMZ_DOI, products, 2),
+    pick(lt, T.CASES_OUT, tCond, T.AMZ_DOI),
+  ]);
+  emit(cfg.TABS.CSV_TAC_FBA, CH, [
+    '',
+    constant(lt, T.NAME, tCond, T.AMZ_DOI, date),
+    constant(lt, T.NAME, tCond, T.AMZ_DOI,
+      '"' + cfg.OUTPUT.SHIP_METHOD_TAC_FBA + '"'),
+    pick(lt, T.NAME, tCond, T.AMZ_DOI),
+    pick(lt, T.UNITS_OUT, tCond, T.AMZ_DOI),
+    '',
+  ]);
+
+  // ---- CSV to Tactical ----------------------------------------------------
+  //
+  // The pick instruction for the warehouse, so the last column is the whole
+  // draw on Tactical this run — both lanes, not just the palletised one.
+  var drawn = 'ARRAYFORMULA((N(' + la.col(A.TAC_AVAILABLE) + ')>0)+(N('
+    + la.col(A.CASES_OUT) + ')>0)>0)';
+  var byName = 'FILTER(' + la.col(A.NAME) + ',' + drawn + ')';
+  var fromFba = 'IFERROR(VLOOKUP(SORT(' + byName + ',' + byName + ',TRUE),'
+    + quoteTab(cfg.TABS.TAC_TO_FBA) + '!$' + colLetter(T.NAME) + ':$'
+    + colLetter(T.CASES_OUT) + ',' + (T.CASES_OUT - T.NAME + 1) + ',FALSE),0)';
+  emit(cfg.TABS.CSV_TO_TACTICAL, CH, [
+    '=IFERROR(SORT(' + byName + ',' + byName + ',TRUE),"")',
+    '=IFERROR(SORT(FILTER(' + la.col(A.AVAILABLE_CASES) + ',' + drawn + '),'
+      + byName + ',TRUE),"")',
+    '=IFERROR(SORT(FILTER(' + la.col(A.TAC_AVAILABLE) + ',' + drawn + '),'
+      + byName + ',TRUE),"")',
+    '=IFERROR(ARRAYFORMULA(N(SORT(FILTER(' + la.col(A.CASES_OUT) + ',' + drawn
+      + '),' + byName + ',TRUE))+N(' + fromFba + ')),"")',
+  ]);
+
+  return out;
+}
+
+/**
+ * How many rows each lane's formulas cover, from the results of writing them.
+ * Falls back to the rows the reader saw, so the output tabs still reach the
+ * bottom of the data when the formula layer was skipped.
+ */
+function laneRowsWritten(input) {
+  var out = { TAC_TO_AWD: 0, AWD_TO_FBA: 0, TAC_TO_FBA: 0 };
+  (input.meta.formulas || []).forEach(function (r) {
+    if (r && r.lane && r.rows > 0) out[r.lane] = r.rows;
+  });
+  if (!out.TAC_TO_AWD) out.TAC_TO_AWD = input.tacToAwd.length;
+  if (!out.AWD_TO_FBA) out.AWD_TO_FBA = input.awdToFba.length;
+  if (!out.TAC_TO_FBA) out.TAC_TO_FBA = input.tacToFba.length;
   return out;
 }

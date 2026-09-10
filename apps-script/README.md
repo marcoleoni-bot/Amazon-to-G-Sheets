@@ -128,6 +128,34 @@ residual. So when AWD looked at 101-4001, decided its cover was fine and sent
 nothing, the residual gate read "AWD found no need" and shut. Nobody filled the
 floor and nothing said so.
 
+### The pick lists and CSV tabs are formulas too
+
+`To transfer Tac-AWD`, `AWD TO FBA`, `To transfer Tac-FBA`,
+`CSV upload TACTICAL AWD`, `CSV upload TACTICAL FBA` and `CSV to Tactical` are
+generated as formulas over the lanes, not pasted as rows. Change a case count
+on a lane — or type a quantity onto a SKU the plan skipped — and the row
+appears on the pick list on its own, with its units and ship method filled in.
+
+Each column is its own `SORT(FILTER(...))`, filtered on *cases > 0* and sorted
+on days of cover at the destination. Every column of a tab uses the same filter
+and the same sort key, so the rows stay aligned. Written without `{}` array
+literals or `QUERY` on purpose: the array separator is locale-dependent and a
+sheet opened outside the US would break silently — there's a test for that.
+
+### Every write is read back and compared
+
+Not "is there a formula there?" — *is it the formula we asked for?* On 09-09
+the AWD > FBA transfer column came back holding the template's own
+`ROUNDUP((100-O8)*F8/Q8,0)`. Our write to that one column had been dropped
+silently, with no exception, while the other thirteen landed, and a
+presence-only check waved it through. Comparison is on a normalised 20-char
+prefix, which is past the opening `IF(` of every formula here and short of
+anything Sheets rewrites (`FLOOR(x)` comes back as `FLOOR(x,1)`).
+
+Columns that fail are rewritten once, then the run stops and names them.
+Adjacent columns go in one call rather than one each — fourteen separate
+single-column writes per lane was fourteen chances for one to go missing.
+
 ### Two implementations, checked against each other
 
 The rules exist twice: in `Rules_*.gs` and in the formulas. Two
@@ -193,7 +221,7 @@ rather than a Node-flavoured copy of it.
 ```bash
 npm test                                     # no network
 node --test test/planner-rules.test.js       # 54 rule tests
-node --test test/planner-formulas.test.js    # 40 formula tests
+node --test test/planner-formulas.test.js    # 47 formula tests
 ```
 
 ## How far the formulas run

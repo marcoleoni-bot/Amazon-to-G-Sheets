@@ -24,11 +24,15 @@ function writePlan(planner, input, plan, cfg, ctx) {
   if (cfg.OUTPUT.WRITE_RECOMPUTED_Y && !cfg.FORMULAS.ENABLED) {
     writeAvailableOnlyDoi(input.sheets.awdToFba, input.awdToFba, cfg);
   }
-  if (cfg.OUTPUT.WRITE_SUMMARIES) {
-    writeSummaries(planner, input, plan, cfg);
-  }
-  if (cfg.OUTPUT.WRITE_CSV_TABS) {
-    writeCsvTabs(planner, input, plan, cfg);
+  // The pick lists and CSV tabs: formulas over the lanes when the formula
+  // layer is on, so changing a case count — or typing a quantity onto a SKU
+  // the plan skipped — updates them without another run. Pasted rows made
+  // them a photograph of the moment the plan was built.
+  if (cfg.FORMULAS.ENABLED) {
+    input.meta.outputs = writeOutputFormulas(planner, cfg, laneRowsWritten(input));
+  } else {
+    if (cfg.OUTPUT.WRITE_SUMMARIES) writeSummaries(planner, input, plan, cfg);
+    if (cfg.OUTPUT.WRITE_CSV_TABS) writeCsvTabs(planner, input, plan, cfg);
   }
   writeRunHeader(planner, input, plan, cfg, ctx);
 }

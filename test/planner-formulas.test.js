@@ -844,24 +844,164 @@ test('countDataRows stops at the last SKU, on any tab', () => {
     'an empty tab counts as none');
 });
 
-test('a lane whose formulas did not land is reported, not returned as ok', () => {
+test('a column that would not take the formula is caught, not waved through', () => {
   const c = cfg();
-  const first = c.LAYOUT.LANE_FIRST_DATA_ROW;
-  const casesCol = c.COLS.AWD_TO_FBA.CASES_OUT + 1;
+  const want = '=IF($C8="","",IF(N($F8)<=0,0,MAX(0,Dss_BaselineDoi)))';
+  const byColumn = { 15: [[want]] };
+  const at = (formula) => ({ getRange: () => ({ getFormula: () => formula }) });
 
-  const empty = { getRange: () => ({ getFormula: () => '' }) };
-  assert.match(G.laneFormulaHealth(empty, 'AWD_TO_FBA', c) || '',
-    /holds no formula/, 'a blank transfer column is a failure, not a plan');
+  assert.deepEqual(G.unwrittenColumns(at(''), byColumn, 8), ['15'],
+    'a blank transfer column is a failure, not a plan');
 
-  const broken = {
-    getRange: () => ({ getFormula: () => '=IF(N($J8)+N($O8)<#REF!,1,0)' }),
-  };
-  assert.match(G.laneFormulaHealth(broken, 'AWD_TO_FBA', c) || '', /#REF!/,
-    'a formula carrying #REF! is a failure too');
+  // The 09-09 failure: our write dropped, the template's own formula left in
+  // place. It is a formula, and it has no #REF!, and it is still wrong.
+  assert.deepEqual(G.unwrittenColumns(at('=ROUNDUP((100-O8)*F8/Q8,0)'), byColumn, 8),
+    ['15'], "the template's own formula must not pass for ours");
 
-  const good = {
-    getRange: () => ({ getFormula: () => '=IF($C8="","",MAX(0,Dss_BaselineDoi))' }),
-  };
-  assert.equal(G.laneFormulaHealth(good, 'AWD_TO_FBA', c), null);
-  assert.ok(casesCol > 0);
+  assert.deepEqual(G.unwrittenColumns(at('=IF($C8="","",IF(N($F8)<=0,0,#REF!)))'),
+    byColumn, 8), ['15'], 'nor may one carrying #REF!');
+
+  assert.deepEqual(G.unwrittenColumns(at(want), byColumn, 8), [],
+    'the formula we asked for passes');
+  assert.deepEqual(
+    G.unwrittenColumns(at('=IF($C8="", "", IF(N($F8)<=0, 0, MAX(0, Dss_BaselineDoi)))'),
+      byColumn, 8), [],
+    "and so does the same formula after Sheets has reformatted it");
 });
+
+test('adjacent columns are written in one call, not one each', () => {
+  const written = [];
+  const sheet = {
+    getRange: (r, cc, nr, nc) => ({
+      setFormulas: () => written.push({ col: cc, width: nc, rows: nr }),
+    }),
+  };
+  const byColumn = { 8: [['=A']], 9: [['=B']], 13: [['=C']], 14: [['=D']], 15: [['=E']] };
+  G.writeColumnBlocks(sheet, byColumn, 8, 1);
+
+  assert.deepEqual(written, [
+    { col: 9, width: 2, rows: 1 },
+    { col: 14, width: 3, rows: 1 },
+  ], 'two runs of adjacent columns, two calls');
+});
+
+// -------------------------------------------------------- the output tabs
+
+/** A workbook stub that records every formula written to every tab. */
+function mockPlanner(name) {
+  const written = new Map();       // tab -> [{row, col, formula}]
+  const tab = (t) => ({
+    getMaxRows: () => 1000,
+    getMaxColumns: () => 30,
+    getRange: (r, c) => ({
+      setFormula: (f) => {
+        if (!written.has(t)) written.set(t, []);
+        written.get(t).push({ row: r, col: c, formula: f });
+      },
+      clearContent() { return this; },
+      setBackground() { return this; },
+    }),
+    getName: () => t,
+  });
+  return {
+    written,
+    getName: () => name,
+    getSheets: () => [],
+    _tab: tab,
+  };
+}
+
+function runOutputs(c) {
+  const planner = mockPlanner('09-10-26');
+  const tabs = new Map();
+  // sheetByName walks getSheets(); hand it a sheet for every configured tab.
+  const names = Object.values(c.TABS);
+  const sheets = names.map((n) => {
+    const s = planner._tab(n);
+    tabs.set(n, s);
+    return s;
+  });
+  planner.getSheets = () => sheets;
+  const res = G.writeOutputFormulas(planner, c,
+    { TAC_TO_AWD: 491, AWD_TO_FBA: 491, TAC_TO_FBA: 491 });
+  return { planner, res };
+}
+
+test('the pick lists and CSV tabs are written as formulas', () => {
+  const c = cfg();
+  const { planner, res } = runOutputs(c);
+
+  const expected = {
+    [c.TABS.SUMMARY_TAC_AWD]: 6,
+    [c.TABS.SUMMARY_AWD_FBA]: 5,
+    [c.TABS.SUMMARY_TAC_FBA]: 5,
+    [c.TABS.CSV_TAC_AWD]: 4,     // externalid and FBA_iD stay blank
+    [c.TABS.CSV_TAC_FBA]: 4,
+    [c.TABS.CSV_TO_TACTICAL]: 4,
+  };
+  for (const [tabName, count] of Object.entries(expected)) {
+    const got = planner.written.get(tabName) || [];
+    assert.equal(got.length, count, `${tabName} should get ${count} formulas`);
+    got.forEach((w) => assert.ok(w.formula.startsWith('='),
+      `${tabName} col ${w.col} is not a formula: ${w.formula}`));
+  }
+  assert.ok(res.every((r) => r.ok), JSON.stringify(res));
+});
+
+test('every generated formula parses, on the lanes and the output tabs', () => {
+  const c = cfg();
+
+  ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].forEach((lane) => {
+    const built = G.LANE_FORMULA_BUILDERS[lane](8, c);
+    Object.entries(built).forEach(([col, f]) => {
+      assert.doesNotThrow(() => parseFormula(f),
+        `${lane} col ${col} does not parse:\n${f}`);
+    });
+  });
+
+  const { planner } = runOutputs(c);
+  for (const [tabName, rows] of planner.written) {
+    rows.forEach((w) => {
+      assert.doesNotThrow(() => parseFormula(w.formula),
+        `${tabName} col ${w.col} does not parse:\n${w.formula}`);
+    });
+  }
+});
+
+test('no generated formula uses a locale-dependent array literal', () => {
+  const c = cfg();
+  const check = (label, f) => {
+    assert.ok(!/[{}]/.test(f),
+      `${label} uses {} — the array separator differs by locale:\n${f}`);
+  };
+  ['TAC_TO_AWD', 'AWD_TO_FBA', 'TAC_TO_FBA'].forEach((lane) => {
+    const built = G.LANE_FORMULA_BUILDERS[lane](8, c);
+    Object.entries(built).forEach(([col, f]) => check(`${lane} ${col}`, f));
+  });
+  const { planner } = runOutputs(c);
+  for (const [tabName, rows] of planner.written) {
+    rows.forEach((w) => check(`${tabName} ${w.col}`, w.formula));
+  }
+});
+
+test('the pick lists read the transfer column, so an edit reaches them', () => {
+  const c = cfg();
+  const { planner } = runOutputs(c);
+
+  const casesCol = (lane) => colLetterOf(c.COLS[lane].CASES_OUT);
+  const awdFba = planner.written.get(c.TABS.SUMMARY_AWD_FBA)[0].formula;
+  assert.ok(awdFba.includes(`$${casesCol('AWD_TO_FBA')}$8`),
+    `the AWD > FBA pick list must filter on its transfer column:\n${awdFba}`);
+
+  const csv = planner.written.get(c.TABS.CSV_TAC_AWD);
+  const sku = csv.find((w) => w.col === 4).formula;
+  assert.ok(sku.includes(`$${casesCol('TAC_TO_AWD')}$8`),
+    `the Tactical > AWD CSV must filter on its transfer column:\n${sku}`);
+});
+
+function colLetterOf(i) {
+  let s = '';
+  let n = i + 1;
+  while (n > 0) { s = String.fromCharCode(65 + ((n - 1) % 26)) + s; n = Math.floor((n - 1) / 26); }
+  return s;
+}
