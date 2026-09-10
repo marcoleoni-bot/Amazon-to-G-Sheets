@@ -1045,3 +1045,69 @@ test('an older runtime without getFilter still gets its rows shown', () => {
   assert.equal(G.unhideForWriting(sheet), null, 'no getFilter() is not an error');
   assert.deepEqual(shown, [[1, 20]]);
 });
+
+// --------------------------------------------- Critical is a lookup, not a flag
+
+test('a Critical SKU reaches pass 2, whatever shape the flag column takes', () => {
+  const c = cfg();
+
+  // The Critical? column is =IFERROR(VLOOKUP(name,CRITICAL!B:B,1,0),"NO"), so a
+  // critical row holds its own SKU and a non-critical row holds "NO".
+  const rows = harmonise('AWD_TO_FBA', [
+    awdFbaRow({ sku: '101-2092-B', critical: '101-2092-B',
+      amzFulfillable: 600, rate: 10, trueRate30: 10, caseQty: 20,
+      awdAvailableUnits: 10000 }),
+    awdFbaRow({ sku: '401-1001-B', critical: 'NO',
+      amzFulfillable: 600, rate: 10, trueRate30: 10, caseQty: 20,
+      awdAvailableUnits: 10000 }),
+    awdFbaRow({ sku: 'B2B-1', b2b: 1, critical: 'NO',
+      amzFulfillable: 600, rate: 10, trueRate30: 10, caseQty: 20,
+      awdAvailableUnits: 10000 }),
+  ]);
+
+  const wb = buildWorkbook(gs, c, { awdToFba: rows });
+  const W = G.laneWorkColumns(c, 'AWD_TO_FBA');
+  const at = (col, row) => cell(wb, c, 'AWD_TO_FBA', col, row);
+
+  assert.equal(at(W.PASS, 8), 2, 'the SKU is on CRITICAL, so this is pass 2');
+  assert.equal(at(W.TARGET, 8), c.RULES.PRIORITY_DOI,
+    'and it aims at 100 DOI, not the 60-day baseline');
+
+  assert.equal(at(W.PASS, 9), 3, '"NO" means not critical');
+  assert.equal(at(W.TARGET, 9), c.RULES.DSS);
+
+  assert.equal(at(W.PASS, 10), 2, 'a numeric 1 in the B2B column still counts');
+  assert.equal(at(W.TARGET, 10), c.RULES.PRIORITY_DOI);
+});
+
+test('Tactical > FBA reads the Critical column the same way', () => {
+  const c = cfg();
+  const rows = harmonise('TAC_TO_FBA', [
+    tacFbaRow({ sku: 'C1', critical: 'C1', rate: 10, trueRate30: 10,
+      caseQty: 20, amzFulfillable: 300, awdAvailableUnits: 0,
+      tacAvailableUnits: 4000, minUnits: 0 }),
+    tacFbaRow({ sku: 'C2', critical: 'NO', rate: 10, trueRate30: 10,
+      caseQty: 20, amzFulfillable: 300, awdAvailableUnits: 0,
+      tacAvailableUnits: 4000, minUnits: 0 }),
+  ]);
+  const wb = buildWorkbook(gs, c, { tacToFba: rows });
+  const W = G.laneWorkColumns(c, 'TAC_TO_FBA');
+
+  assert.equal(cell(wb, c, 'TAC_TO_FBA', W.TARGET, 8), c.RULES.PRIORITY_DOI);
+  assert.equal(cell(wb, c, 'TAC_TO_FBA', W.TARGET, 9), c.RULES.DSS);
+});
+
+test('an unreadable flag cell counts as no, not as priority', () => {
+  const c = cfg();
+  const rows = harmonise('AWD_TO_FBA', [awdFbaRow({
+    sku: 'X1', critical: 'NO', amzFulfillable: 600, rate: 10, trueRate30: 10,
+    caseQty: 20, awdAvailableUnits: 10000,
+  })]);
+  const wb = buildWorkbook(gs, c, { awdToFba: rows });
+  wb.sheets[c.TABS.AWD_TO_FBA][7][c.COLS.AWD_TO_FBA.CRITICAL] = '=Unauthorised';
+  wb.cache.clear();
+
+  const W = G.laneWorkColumns(c, 'AWD_TO_FBA');
+  assert.equal(cell(wb, c, 'AWD_TO_FBA', W.TARGET, 8), c.RULES.DSS,
+    'a cell nobody can read must not promote a SKU to the priority target');
+});

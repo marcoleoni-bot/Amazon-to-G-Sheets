@@ -106,6 +106,32 @@ Existing names are now re-pointed with `setRange()`, which touches no formula.
 A workbook already carrying that damage is repaired by the next run, since
 every calculated column is rewritten from scratch.
 
+### "Critical?" is a lookup, not a flag
+
+The two priority columns on these lanes do not agree on what a yes looks like:
+
+```
+B2B        column A   a plain 0 or 1
+Critical?  column B   =IFERROR(VLOOKUP(C8,CRITICAL!B:B,1,0),"NO")
+```
+
+That second one returns **the SKU itself** when the row is on the CRITICAL tab,
+and the string `"NO"` when it is not. Testing for `TRUE/YES/Y/T/1` matched the
+numeric B2B flag and never matched a SKU — so every Critical SKU fell through
+to pass 3 and was topped up to the 60-day baseline instead of 100. `101-2092-B`
+and `401-1001-B` are both on the CRITICAL tab and both came back
+`Pass 3, Target 60`.
+
+The test is now "anything but a no": the sentinels are named (`NO`, `N`,
+`FALSE`, `0`, `NONE`, `N/A`, `-`, blank) and everything else present counts. An
+unreadable cell reads as no, which leaves the SKU on the baseline rather than
+promoting it on a cell nobody can see.
+
+Worth noting where this surfaced first: the reconciliation had been reporting
+it for weeks — *"AWD_TO_FBA 101-2092-B: sheet 0, rules 24"*. The rule engine
+reads the CRITICAL tab directly and got it right; only the formula was wrong,
+and the two disagreeing is exactly what that check exists to say.
+
 ### The per-SKU unit floor at FBA
 
 `Fba_MinUnitsBySku` — `101-4001 → 100` — is a count of stock somebody decided
@@ -251,7 +277,7 @@ rather than a Node-flavoured copy of it.
 ```bash
 npm test                                     # no network
 node --test test/planner-rules.test.js       # 54 rule tests
-node --test test/planner-formulas.test.js    # 50 formula tests
+node --test test/planner-formulas.test.js    # 53 formula tests
 ```
 
 ## How far the formulas run

@@ -342,9 +342,15 @@ const FUNCTIONS = {
   ISERROR: (args, ev) => isErr(ev(args[0])),
   ISNA: (args, ev) => { const v = ev(args[0]); return isErr(v) && v.code === '#N/A'; },
   ISBLANK: (args, ev) => ev(args[0]) === '',
-  UPPER: (args, ev) => String(ev(args[0]) ?? '').toUpperCase(),
-  LOWER: (args, ev) => String(ev(args[0]) ?? '').toLowerCase(),
-  TRIM: (args, ev) => String(ev(args[0]) ?? '').replace(/\s+/g, ' ').trim(),
+  // The text functions propagate errors rather than stringifying them, which
+  // is what Sheets does and what lets an IFERROR around them catch a #NAME?
+  // or #REF! coming out of the cell they were handed.
+  UPPER: (args, ev) => { const v = ev(args[0]); return isErr(v) ? v : String(v ?? '').toUpperCase(); },
+  LOWER: (args, ev) => { const v = ev(args[0]); return isErr(v) ? v : String(v ?? '').toLowerCase(); },
+  TRIM: (args, ev) => {
+    const v = ev(args[0]);
+    return isErr(v) ? v : String(v ?? '').replace(/\s+/g, ' ').trim();
+  },
   ROUNDUP: (args, ev) => {
     const x = toNumber(ev(args[0]));
     if (isErr(x)) return x;

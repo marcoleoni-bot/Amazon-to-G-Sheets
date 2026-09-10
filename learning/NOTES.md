@@ -26,7 +26,10 @@ retrieval questions rather than exposition where possible.
 ## Candidate next lessons
 
 1. Reading the Run header as a diagnostic instrument — it now reports filters
-   removed, floors that disagreed, and sheet-vs-rules differences.
+   removed, floors that disagreed, and sheet-vs-rules differences. Strong
+   worked example available: the Critical-SKU bug sat in that report for weeks
+   as "AWD_TO_FBA 101-2092-B: sheet 0, rules 24" before anyone read it. Good
+   material for teaching that the report is a to-do list, not decoration.
 2. Telling a *rule* disagreement from a *data* problem: when the Reason column
    says something you disagree with, is the threshold wrong or the input wrong?
 3. Changing a dial on the Settings tab and predicting what moves — the cheapest

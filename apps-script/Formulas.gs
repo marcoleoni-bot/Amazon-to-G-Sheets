@@ -76,14 +76,33 @@ function laneLookup(cfg, laneKey, keyCol0, valueCol0, keyExpr) {
 /**
  * Whether a flag cell means yes.
  *
+ * Read as "anything but a no", because the two flag columns on these lanes do
+ * not agree on what a yes looks like:
+ *
+ *   B2B        column A, a plain 0 or 1
+ *   Critical?  column B, =IFERROR(VLOOKUP(C8,CRITICAL!B:B,1,0),"NO")
+ *
+ * That second one returns **the SKU itself** when the row is on the CRITICAL
+ * tab, and the string "NO" when it is not. Testing for TRUE/YES/Y/T/1 matched
+ * the numeric B2B flag and never matched a SKU, so every Critical SKU fell
+ * through to pass 3 and was topped up to the 60-day baseline instead of 100.
+ * 101-2092-B and 401-1001-B are both on the CRITICAL tab and both landed on
+ * `Pass 3, Target 60`.
+ *
+ * So the sentinels are named and everything else that is present counts. An
+ * unreadable cell reads as no, which is the safe direction: it leaves the SKU
+ * on the baseline rather than promoting it on a cell nobody can see.
+ *
  * Spelled out rather than using an array literal, because `{"TRUE";"YES"}`
  * needs a different separator in a non-US locale and would break silently on a
  * sheet opened somewhere else.
  */
 function truthyRef(col0, row) {
   var s = 'UPPER(TRIM(' + cellRef(col0, row) + '&""))';
-  return 'OR(' + s + '="TRUE",' + s + '="YES",' + s + '="Y",' + s + '="T",'
-    + s + '="1")';
+  var no = ['', 'NO', 'N', 'FALSE', '0', 'NONE', 'N/A', '#N/A', '-'];
+  return 'IFERROR(AND(' + no.map(function (v) {
+    return s + '<>"' + v + '"';
+  }).join(',') + '),FALSE)';
 }
 
 function isDiscontinuedRef(col0, row) {
