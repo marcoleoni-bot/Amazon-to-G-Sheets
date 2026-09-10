@@ -1005,3 +1005,43 @@ function colLetterOf(i) {
   while (n > 0) { s = String.fromCharCode(65 + ((n - 1) % 26)) + s; n = Math.floor((n - 1) / 26); }
   return s;
 }
+
+// ------------------------------------------ filters, the silent write-swallower
+
+test('a filter is removed and hidden rows shown before anything is written', () => {
+  const events = [];
+  const filter = {
+    getRange: () => ({ getA1Notation: () => 'A7:Z498' }),
+    remove: () => events.push('filter removed'),
+  };
+  const sheet = {
+    getFilter: () => filter,
+    getMaxRows: () => 1000,
+    showRows: (from, n) => events.push(`rows shown ${from}..${from + n - 1}`),
+  };
+
+  assert.equal(G.unhideForWriting(sheet), 'filter over A7:Z498');
+  assert.deepEqual(events, ['filter removed', 'rows shown 1..1000'],
+    'Apps Script will not write to a row a filter has hidden');
+});
+
+test('a sheet with nothing in the way reports nothing removed', () => {
+  const shown = [];
+  const sheet = {
+    getFilter: () => null,
+    getMaxRows: () => 500,
+    showRows: (from, n) => shown.push([from, n]),
+  };
+  assert.equal(G.unhideForWriting(sheet), null);
+  assert.deepEqual(shown, [[1, 500]], 'rows are still unhidden, cheaply');
+});
+
+test('an older runtime without getFilter still gets its rows shown', () => {
+  const shown = [];
+  const sheet = {
+    getMaxRows: () => 20,
+    showRows: (from, n) => shown.push([from, n]),
+  };
+  assert.equal(G.unhideForWriting(sheet), null, 'no getFilter() is not an error');
+  assert.deepEqual(shown, [[1, 20]]);
+});

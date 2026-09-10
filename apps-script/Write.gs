@@ -350,6 +350,7 @@ function writeRunHeader(planner, input, plan, cfg, ctx) {
       }).join('; ')
       : input.meta.laneSource + ' (not refreshed this run)'],
     ['Tactical floor from', input.meta.minUnitsSource],
+    ['Filters removed', filtersRemoved(input).join('; ') || 'none were in the way'],
     ['Floors that disagreed', (input.meta.floorDisagreed || []).length
       ? input.meta.floorDisagreed.join('; ')
       : 'none — the B2B tab and column B agree on every SKU'],
@@ -431,4 +432,21 @@ function palletStatus(p) {
     return 'topped up to ' + (p.demandCases + p.filledCases) + ' cases';
   }
   return 'met by demand (' + p.demandCases + ' cases)';
+}
+
+/**
+ * Filters cleared off the lanes this run, for the record.
+ *
+ * Worth reporting rather than doing quietly: a filter left on a lane is how a
+ * whole lane's formulas silently failed to write, and the person who set it
+ * should know it is gone.
+ */
+function filtersRemoved(input) {
+  var out = [];
+  ['refreshed', 'formulas'].forEach(function (key) {
+    (input.meta[key] || []).forEach(function (r) {
+      if (r && r.unfiltered) out.push((r.lane || '') + ': ' + r.unfiltered);
+    });
+  });
+  return out.filter(function (v, i) { return out.indexOf(v) === i; });
 }

@@ -92,6 +92,11 @@ function refreshLane(ims, planner, laneKey, cfg) {
       + '" is a Connected Sheet — copy it to an ordinary tab first' };
   }
 
+  // A filter on the lane hides rows, and Apps Script will not paste into a row
+  // a filter has hidden — silently, leaving last run's numbers in place. Clear
+  // it before touching anything.
+  var unfiltered = unhideForWriting(plannerSheet);
+
   var headerRow = cfg.LAYOUT.LANE_HEADER_ROW;
   var firstRow = cfg.LAYOUT.LANE_FIRST_DATA_ROW;
 
@@ -153,7 +158,7 @@ function refreshLane(ims, planner, laneKey, cfg) {
 
   return {
     lane: tabName, ok: true, rows: srcRows, from: src.getName(), how: found.how,
-    copied: copied.length, preserved: skipped.length,
+    copied: copied.length, preserved: skipped.length, unfiltered: unfiltered,
   };
 }
 

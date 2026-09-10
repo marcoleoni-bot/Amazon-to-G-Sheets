@@ -492,6 +492,21 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
   // 5,734 rows for Tactical > AWD — it had read the IMS tab's last row rather
   // than its last SKU — and taking the maximum spread transfer formulas over
   // all of them.
+  // A filter hides rows, and Apps Script will not write to a row a filter has
+  // hidden. It fails the way this whole project keeps failing — silently, with
+  // no exception, leaving the cells exactly as they were.
+  //
+  // On 09-09 the Tactical > FBA tab carried a filter showing only rows where
+  // the transfer column was 3 or 7. Two rows out of 491 took the formulas, and
+  // the run said it had succeeded. A later copy of the same template had a
+  // filter with an empty criteria list, which hides everything, and then not
+  // one of the fourteen columns would take a formula at all.
+  //
+  // The criteria refer to last run's numbers and are meaningless against this
+  // run's, so the filter is removed rather than preserved — and any rows hidden
+  // by hand are shown, for the same reason.
+  var unfiltered = unhideForWriting(sheet);
+
   var counted = laneRowCount(sheet, laneKey, cfg);
   var rows = counted > 0 ? counted : rowCount;
   if (rows <= 0) {
@@ -558,7 +573,7 @@ function writeLaneFormulas(sheet, laneKey, rowCount, cfg) {
 
   return {
     lane: laneKey, ok: true, rows: rows, counted: counted, hinted: rowCount || 0,
-    columns: Object.keys(byColumn).length,
+    columns: Object.keys(byColumn).length, unfiltered: unfiltered,
   };
 }
 
@@ -919,6 +934,9 @@ function writeOutputFormulas(planner, cfg, rowsByLane) {
       out.push({ tab: tabName, ok: false, note: 'no such tab' });
       return;
     }
+    // Same trap as the lanes: a filter here would silently swallow the write.
+    unhideForWriting(sh);
+
     // Everything under the header is regenerated, so last week's rows cannot
     // survive underneath this week's spill.
     var below = sh.getMaxRows() - headerRow;
@@ -1029,4 +1047,36 @@ function laneRowsWritten(input) {
   if (!out.AWD_TO_FBA) out.AWD_TO_FBA = input.awdToFba.length;
   if (!out.TAC_TO_FBA) out.TAC_TO_FBA = input.tacToFba.length;
   return out;
+}
+
+/**
+ * Make every row on a sheet writable: drop any filter, show any hidden row.
+ *
+ * Returns what was removed, so the run can say so, or null if there was
+ * nothing in the way.
+ *
+ * This is the fix for the longest-running fault in this project. Apps Script's
+ * setValues() and setFormulas() skip rows that a filter has hidden. No error,
+ * no partial-write warning — the cells simply keep whatever was in them, and
+ * every check downstream reads a number that was never recalculated.
+ */
+function unhideForWriting(sheet) {
+  var note = null;
+  try {
+    var filter = sheet.getFilter();
+    if (filter) {
+      var where = filter.getRange().getA1Notation();
+      filter.remove();
+      note = 'filter over ' + where;
+    }
+  } catch (e) {
+    // Older runtimes have no getFilter(); nothing to clear there.
+  }
+  try {
+    var rows = sheet.getMaxRows();
+    if (rows > 0) sheet.showRows(1, rows);
+  } catch (e) {
+    // Not fatal: a sheet that will not unhide still gets written to below.
+  }
+  return note;
 }

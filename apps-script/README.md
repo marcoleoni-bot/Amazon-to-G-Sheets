@@ -142,6 +142,36 @@ and the same sort key, so the rows stay aligned. Written without `{}` array
 literals or `QUERY` on purpose: the array separator is locale-dependent and a
 sheet opened outside the US would break silently — there's a test for that.
 
+### A filter on a lane silently swallows every write
+
+This was the longest-running fault in the project, and it is not a bug in the
+formulas at all.
+
+**Apps Script's `setValues()` and `setFormulas()` do not write to a row that a
+filter has hidden.** No error, no partial-write warning — the cells simply keep
+whatever was in them, and everything downstream reads a number that was never
+recalculated.
+
+The Tactical > FBA tab in the September template carried a filter showing only
+rows where the transfer column was 3 or 7. Two rows out of 491 took their
+formulas, and the run reported success. A later copy had a filter with an
+*empty* criteria list, which hides everything, and then not one of the fourteen
+columns would take a formula:
+
+```
+FILTER ref=$A$7:$Z$498  criteria=[(16, ['3.00','7.00'])]
+   -> hides every row where column Q is not 3 or 7
+```
+
+The two lanes that always worked both carried filters with **no criteria** —
+nothing hidden.
+
+So every sheet is stripped of its filter and unhidden before anything is
+written to it: the lanes before the refresh, again before the formulas, and the
+output tabs before their spill. The criteria refer to last run's numbers and
+are meaningless against this run's, so the filter is removed rather than
+restored — and the run header says which ones went.
+
 ### Every write is read back and compared
 
 Not "is there a formula there?" — *is it the formula we asked for?* On 09-09
@@ -221,7 +251,7 @@ rather than a Node-flavoured copy of it.
 ```bash
 npm test                                     # no network
 node --test test/planner-rules.test.js       # 54 rule tests
-node --test test/planner-formulas.test.js    # 47 formula tests
+node --test test/planner-formulas.test.js    # 50 formula tests
 ```
 
 ## How far the formulas run
